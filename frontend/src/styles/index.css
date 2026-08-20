@@ -1,0 +1,21 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-background text-slate-800 antialiased font-sans transition-colors duration-200 dark:bg-background-dark dark:text-slate-200;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    @apply text-slate-900 dark:text-white font-medium tracking-tight;
+  }
+}
+
+@layer components {
+  /* Common utilities for minimal aesthetics */
+  .focus-ring {
+    @apply focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 dark:focus:ring-offset-background-dark;
+  }
+}

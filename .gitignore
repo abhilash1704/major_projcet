@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+venv/
+env/
+.env
+
+# React / Vite
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# SQLite
+*.sqlite3
+*.db
+instance/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# OS Files
+.DS_Store
+Thumbs.db
