@@ -36,10 +36,10 @@ export const Sidebar = ({ isOpen, setIsOpen }) => {
         <div className="h-16 flex items-center justify-between px-6 border-b border-slate-100 dark:border-slate-800">
           <Link to="/" className="flex items-center gap-3">
             <div className="w-9 h-9 bg-primary rounded-xl flex items-center justify-center shrink-0 shadow-md shadow-primary/20">
-              <span className="text-white font-bold text-lg">R</span>
+              <span className="text-white font-bold text-lg">A</span>
             </div>
             <h1 className="text-xl font-bold text-slate-900 dark:text-white tracking-tight lg:hidden group-hover:block whitespace-nowrap">
-              Route<span className="text-primary">Flow</span>
+              Algo<span className="text-primary">Routes</span>
             </h1>
           </Link>
           <IconButton icon={X} onClick={() => setIsOpen(false)} className="lg:hidden" />

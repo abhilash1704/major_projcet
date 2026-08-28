@@ -1,5 +1,5 @@
 /**
- * LandingPage.jsx — Official RouteFlow Landing Page
+ * LandingPage.jsx — Official AlgoRoutes Landing Page
  * Connected directly from abhilash1704/responsive-web-builder
  */
 import { useNavigate, Link } from "react-router-dom";
@@ -87,7 +87,7 @@ export const LandingPage = () => {
               <Icon name="route" className="text-[20px] text-white" />
             </span>
             <span className="truncate font-black text-xl tracking-tight text-white font-sans uppercase">
-              Route<span className="text-blue-500">Flow</span>
+              Algo<span className="text-blue-500">Routes</span>
             </span>
           </Link>
 
@@ -288,7 +288,7 @@ export const LandingPage = () => {
                 <span className="grid h-8 w-8 place-items-center rounded-xl bg-blue-600">
                   <Icon name="route" className="text-[18px] text-white" />
                 </span>
-                <span className="font-extrabold text-xl text-white tracking-tight">RouteFlow</span>
+                <span className="font-extrabold text-xl text-white tracking-tight">AlgoRoutes</span>
               </div>
               <div className="inline-flex items-center gap-2 rounded-full border border-slate-800 bg-slate-900 px-3 py-1">
                 <Icon name="settings_input_component" className="text-[14px] text-emerald-400" />
@@ -352,7 +352,7 @@ export const LandingPage = () => {
 
           <div className="flex flex-col items-center justify-between gap-4 border-t border-slate-800/80 pt-6 sm:flex-row">
             <span className="text-center text-xs font-semibold text-slate-500">
-              © 2026 RouteFlow Intelligence. All rights reserved.
+              © 2026 AlgoRoutes Intelligence. All rights reserved.
             </span>
             <div className="flex items-center gap-4">
               {["language", "terminal", "share"].map((i) => (

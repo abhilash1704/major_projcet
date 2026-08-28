@@ -4,9 +4,9 @@ import { authService } from './authService';
 const AuthContext = createContext(null);
 
 const DEFAULT_GUEST_USER = {
-  name: 'RouteFlow User',
-  full_name: 'RouteFlow User',
-  email: 'user@routeflow.io',
+  name: 'AlgoRoutes User',
+  full_name: 'AlgoRoutes User',
+  email: 'user@algoroutes.io',
   provider: 'local',
   auth_provider: 'local',
   status: 'active',

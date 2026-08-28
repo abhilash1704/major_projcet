@@ -11,7 +11,7 @@
  */
 
 const NOMINATIM_BASE = "https://nominatim.openstreetmap.org/search";
-const USER_AGENT = "RouteFlow/1.0 (Navigation Engine; contact=routeflow-dev)";
+const USER_AGENT = "AlgoRoutes/1.0 (Navigation Engine; contact=algoroutes-dev)";
 const MIN_QUERY_LENGTH = 3;
 const REQUEST_TIMEOUT_MS = 8000;
 

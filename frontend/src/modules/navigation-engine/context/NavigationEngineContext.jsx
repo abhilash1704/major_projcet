@@ -39,8 +39,52 @@ export const NavigationProvider = ({ children }) => {
 
   // State required for Phase 3 & 4
   const [currentLocation, setCurrentLocation] = useState(null);
-  const [sourceLocation, setSourceLocation] = useState(null);
-  const [destinationLocation, setDestinationLocation] = useState(null);
+  const [sourceText, setSourceTextState] = useState(() => {
+    return localStorage.getItem("rf_source_text") || "";
+  });
+  const [destinationText, setDestinationTextState] = useState(() => {
+    return localStorage.getItem("rf_destination_text") || "";
+  });
+  const [sourceLocation, setSourceLocationState] = useState(() => {
+    try {
+      const saved = localStorage.getItem("rf_source_location");
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+  const [destinationLocation, setDestinationLocationState] = useState(() => {
+    try {
+      const saved = localStorage.getItem("rf_destination_location");
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  const setSourceText = useCallback((val) => {
+    setSourceTextState(val);
+    if (val) localStorage.setItem("rf_source_text", val);
+    else localStorage.removeItem("rf_source_text");
+  }, []);
+
+  const setDestinationText = useCallback((val) => {
+    setDestinationTextState(val);
+    if (val) localStorage.setItem("rf_destination_text", val);
+    else localStorage.removeItem("rf_destination_text");
+  }, []);
+
+  const setSourceLocation = useCallback((val) => {
+    setSourceLocationState(val);
+    if (val) localStorage.setItem("rf_source_location", JSON.stringify(val));
+    else localStorage.removeItem("rf_source_location");
+  }, []);
+
+  const setDestinationLocation = useCallback((val) => {
+    setDestinationLocationState(val);
+    if (val) localStorage.setItem("rf_destination_location", JSON.stringify(val));
+    else localStorage.removeItem("rf_destination_location");
+  }, []);
 
   // Sprint 5.4 — Road Network Node state
   const [sourceRoadNode, setSourceRoadNode] = useState(null);
@@ -51,11 +95,38 @@ export const NavigationProvider = ({ children }) => {
   const [destinationNodeError, setDestinationNodeError] = useState(null);
 
   // Sprint 5.5 — Active route state
-  const [activeRoute, setActiveRoute] = useState(null);   // full route object from /api/routes/calculate
+  const [activeRoute, setActiveRouteState] = useState(() => {
+    try {
+      const saved = localStorage.getItem("rf_active_route");
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });   // full route object from /api/routes/calculate
   const [routeLoading, setRouteLoading] = useState(false);
   const [routeError, setRouteError] = useState(null);
-  const [selectedAlgorithm, setSelectedAlgorithm] = useState("astar"); // 'astar' | 'dijkstra'
-  const [selectedRoutingMode, setSelectedRoutingMode] = useState("normal"); // 'normal' | 'traffic_aware'
+  const [selectedAlgorithm, setSelectedAlgorithmState] = useState(() => {
+    return localStorage.getItem("rf_selected_algorithm") || "astar";
+  });
+  const [selectedRoutingMode, setSelectedRoutingModeState] = useState(() => {
+    return localStorage.getItem("rf_selected_routing_mode") || "normal";
+  });
+
+  const setActiveRoute = useCallback((val) => {
+    setActiveRouteState(val);
+    if (val) localStorage.setItem("rf_active_route", JSON.stringify(val));
+    else localStorage.removeItem("rf_active_route");
+  }, []);
+
+  const setSelectedAlgorithm = useCallback((val) => {
+    setSelectedAlgorithmState(val);
+    localStorage.setItem("rf_selected_algorithm", val);
+  }, []);
+
+  const setSelectedRoutingMode = useCallback((val) => {
+    setSelectedRoutingModeState(val);
+    localStorage.setItem("rf_selected_routing_mode", val);
+  }, []);
 
   // Sprint 10, 11 & 11C & High-Traffic Alternative Engine State
   const [comparisonData, setComparisonData] = useState(null);
@@ -498,6 +569,10 @@ export const NavigationProvider = ({ children }) => {
     previousTrafficLevelRef.current = "LOW";
     setIsAlternativeCalculating(false);
 
+    setSourceText("");
+    setDestinationText("");
+    setSourceLocation(null);
+    setDestinationLocation(null);
     setActiveRoute(null);
     setRouteError(null);
     setVehicles([]);
@@ -519,7 +594,7 @@ export const NavigationProvider = ({ children }) => {
     } catch (err) {
       console.warn("Clear simulation on route clear failed:", err.message);
     }
-  }, []);
+  }, [setSourceText, setDestinationText, setSourceLocation, setDestinationLocation, setActiveRoute]);
 
   // ── Simulation: Generate Vehicles (route-aware) ─────────────────────────────
   const handleGenerateVehicles = useCallback(async (count = 100) => {
@@ -729,6 +804,10 @@ export const NavigationProvider = ({ children }) => {
         setUserLocation,
         currentLocation,
         setCurrentLocation,
+        sourceText,
+        setSourceText,
+        destinationText,
+        setDestinationText,
         sourceLocation,
         setSourceLocation,
         destinationLocation,

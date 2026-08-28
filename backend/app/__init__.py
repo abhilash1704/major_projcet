@@ -36,7 +36,6 @@ def create_app(config_name=None):
     # Import models for Flask-Migrate (all models must be imported here)
     from models import User, RouteHistory
     from app.modules.vehicle_simulation.models import Vehicle  # noqa: F401
-    from app.modules.auth.models import RefreshToken, PasswordResetToken  # noqa: F401
 
     with app.app_context():
         db.create_all()
@@ -66,9 +65,6 @@ def create_app(config_name=None):
     from app.modules.live_clustering.routes import live_clustering_bp
     app.register_blueprint(live_clustering_bp)
 
-    from app.modules.auth.routes import auth_bp
-    app.register_blueprint(auth_bp)
-
     from app.modules.history.routes import history_bp
     app.register_blueprint(history_bp)
 
@@ -87,8 +83,8 @@ def create_app(config_name=None):
     @app.route('/')
     def index():
         return jsonify({
-            "name": "RouteFlow API",
-            "message": "Welcome to RouteFlow API. Please use /api/v1/ for endpoints."
+            "name": "AlgoRoutes API",
+            "message": "Welcome to AlgoRoutes API. Please use /api/v1/ for endpoints."
         })
 
     return app

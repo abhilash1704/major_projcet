@@ -81,32 +81,40 @@ def calculate_route():
         )
         
         # Persist to history if user is authenticated
+        # Persist to history using a guest user
         try:
-            from app.modules.auth.security import extract_auth_token, verify_access_token
             from database.db import db
             from models.route_history import RouteHistory
-            token = extract_auth_token()
-            if token:
-                payload = verify_access_token(token)
-                if payload and payload.get('sub'):
-                    user_id = payload.get('sub')
-                    history_entry = RouteHistory(
-                        user_id=user_id,
-                        source_name=data.get("source_name") or "Unknown Location",
-                        source_latitude=src_lat,
-                        source_longitude=src_lon,
-                        destination_name=data.get("destination_name") or "Unknown Location",
-                        destination_latitude=dst_lat,
-                        destination_longitude=dst_lon,
-                        distance_km=route_result.get("distance_km"),
-                        eta_minutes=route_result.get("eta_minutes"),
-                        algorithm=route_result.get("algorithm"),
-                        routing_mode=route_result.get("routing_mode"),
-                        traffic_level=route_result.get("traffic_level"),
-                        traffic_penalty=route_result.get("traffic_cost")
-                    )
-                    db.session.add(history_entry)
-                    db.session.commit()
+            from models.user import User
+
+            user = db.session.query(User).filter_by(email="guest@routeflow.io").first()
+            if not user:
+                user = User(
+                    id="guest_user",
+                    full_name="Guest User",
+                    email="guest@routeflow.io",
+                    auth_provider="guest"
+                )
+                db.session.add(user)
+                db.session.commit()
+                
+            history_entry = RouteHistory(
+                user_id=user.id,
+                source_name=data.get("source_name") or "Unknown Location",
+                source_latitude=src_lat,
+                source_longitude=src_lon,
+                destination_name=data.get("destination_name") or "Unknown Location",
+                destination_latitude=dst_lat,
+                destination_longitude=dst_lon,
+                distance_km=route_result.get("distance_km"),
+                eta_minutes=route_result.get("eta_minutes"),
+                algorithm=route_result.get("algorithm"),
+                routing_mode=route_result.get("routing_mode"),
+                traffic_level=route_result.get("traffic_level"),
+                traffic_penalty=route_result.get("traffic_cost")
+            )
+            db.session.add(history_entry)
+            db.session.commit()
         except Exception as e:
             logger.warning("Failed to persist route history: %s", e)
             try:

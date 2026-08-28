@@ -50,9 +50,10 @@ export const LiveClusteringProvider = ({ children }) => {
   const [evaluation, setEvaluation]                     = useState({ status: "INACTIVE" });
   const [realTraffic, setRealTraffic]                   = useState(null);
 
-  // Selection State
+  // Selection & Filter State
   const [selectedCluster, setSelectedCluster]           = useState(null);
   const [selectedSegment, setSelectedSegment]           = useState(null);
+  const [selectedDensityFilter, setSelectedDensityFilter] = useState(null); // null | 'HIGH' | 'MEDIUM' | 'LOW'
   
   const [status, setStatus]                             = useState("IDLE");
   const [error, setError]                               = useState(null);
@@ -65,6 +66,15 @@ export const LiveClusteringProvider = ({ children }) => {
     selectedAreaRef.current = selectedArea;
     radiusRef.current = analysisRadiusMeters;
   }, [selectedArea, analysisRadiusMeters]);
+
+  // ── Toggle Density Filter (HIGH / MEDIUM / LOW) ──────────────────────────
+  const toggleDensityFilter = useCallback((level) => {
+    setSelectedDensityFilter((prev) => (prev === level ? null : level));
+  }, []);
+
+  const clearDensityFilter = useCallback(() => {
+    setSelectedDensityFilter(null);
+  }, []);
 
   // ── Fetch Full Snapshot ──────────────────────────────────────────────────
   const pollSnapshot = useCallback(async () => {
@@ -103,6 +113,7 @@ export const LiveClusteringProvider = ({ children }) => {
     setError(null);
     setSelectedCluster(null);
     setSelectedSegment(null);
+    setSelectedDensityFilter(null); // Reset filter on area/radius change
 
     // Clear old area markers & clusters immediately
     setObservations([]);
@@ -164,11 +175,15 @@ export const LiveClusteringProvider = ({ children }) => {
     evaluation,
     realTraffic,
 
-    // Selection
+    // Selection & Filter State
     selectedCluster,
     setSelectedCluster,
     selectedSegment,
     setSelectedSegment,
+    selectedDensityFilter,
+    setSelectedDensityFilter,
+    toggleDensityFilter,
+    clearDensityFilter,
 
     status,
     error,

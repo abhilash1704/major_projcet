@@ -11,10 +11,10 @@ export const Navbar = ({ onMenuClick }) => {
         <IconButton icon={Menu} onClick={onMenuClick} className="lg:hidden" />
         <div className="flex items-center gap-2.5">
           <div className="w-8 h-8 bg-primary rounded-xl flex items-center justify-center lg:hidden shadow-sm">
-            <span className="text-white font-bold text-base">R</span>
+            <span className="text-white font-bold text-base">A</span>
           </div>
           <div>
-            <h2 className="text-lg font-bold text-slate-900 dark:text-white leading-tight">RouteFlow</h2>
+            <h2 className="text-lg font-bold text-slate-900 dark:text-white leading-tight">AlgoRoutes</h2>
             <p className="text-xs text-slate-500 dark:text-slate-400 hidden sm:block">Intelligent Navigation Platform</p>
           </div>
         </div>

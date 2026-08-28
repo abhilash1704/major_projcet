@@ -15,15 +15,12 @@ import { useGeolocation } from "../../navigation-engine/hooks/useGeolocation";
  * This hook only owns state and actions, not API calls.
  */
 export const useSearchPanel = () => {
-  // ── local text state ───────────────────────────────────────────────────
-  const [sourceText, setSourceText] = useState("");
-  const [destinationText, setDestinationText] = useState("");
-  const [isSearching, setIsSearching] = useState(false);
-  const [searchError, setSearchError] = useState(null);
-  const [searchInfo, setSearchInfo] = useState(null);
-
-  // ── shared context state (coordinate objects) ─────────────────────────
+  // ── shared context state (coordinate objects + persisted text) ─────────
   const {
+    sourceText,
+    setSourceText,
+    destinationText,
+    setDestinationText,
     currentLocation,
     setCurrentLocation,
     sourceLocation,
@@ -32,6 +29,7 @@ export const useSearchPanel = () => {
     setDestinationLocation,
     sourceRoadNode,
     destinationRoadNode,
+    activeRoute,
     selectedAlgorithm,
     setSelectedAlgorithm,
     selectedRoutingMode,
@@ -39,6 +37,23 @@ export const useSearchPanel = () => {
     calculateAndSetRoute,
     handleClearRoute,
   } = useNavigationEngineContext();
+
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchError, setSearchError] = useState(null);
+  const [searchInfo, setSearchInfo] = useState(null);
+
+  // ── Restore searchInfo if an activeRoute was persisted across reloads ──
+  useEffect(() => {
+    if (activeRoute && !searchInfo && !searchError) {
+      const distKm = activeRoute.total_distance_km ?? activeRoute.distance_km ?? 0;
+      const mins = Math.round((activeRoute.total_travel_time_seconds ?? 0) / 60);
+      const algoLabel = (activeRoute.algorithm || selectedAlgorithm) === "dijkstra" ? "Dijkstra" : "A* Search";
+      const modeLabel = (activeRoute.routing_mode || selectedRoutingMode) === "traffic_aware" ? " (Traffic-Aware)" : "";
+      setSearchInfo(
+        `Route found: ${distKm.toFixed(1)} km · ~${mins} min via ${algoLabel}${modeLabel}`
+      );
+    }
+  }, [activeRoute, selectedAlgorithm, selectedRoutingMode, searchInfo, searchError]);
 
   // ── geolocation (reuse existing hook — no second implementation) ───────
   const { getCurrentLocation, loading: geoLoading } = useGeolocation();

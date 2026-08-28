@@ -7,10 +7,6 @@ import { History } from '../pages/History/History';
 import { Profile } from '../pages/Profile/Profile';
 import { Settings } from '../pages/Settings/Settings';
 import { NotFound } from '../pages/NotFound/NotFound';
-import { Login } from '../pages/Login/Login';
-import { Register } from '../pages/Register/Register';
-import { ForgotPassword } from '../features/auth/ForgotPassword';
-import { ResetPassword } from '../features/auth/ResetPassword';
 import { AuthProvider } from '../features/auth/AuthContext';
 import { ProtectedRoute } from '../features/auth/ProtectedRoute';
 
@@ -19,14 +15,9 @@ export const App = () => {
     <AuthProvider>
       <BrowserRouter>
         <Routes>
-          {/* Public Landing & Authentication Routes */}
+          {/* Public Landing Route */}
           <Route path="/" element={<LandingPage />} />
           <Route path="/home" element={<LandingPage />} />
-          
-          <Route path="/login" element={<Navigate to="/dashboard" replace />} />
-          <Route path="/register" element={<Register />} />
-          <Route path="/forgot-password" element={<ForgotPassword />} />
-          <Route path="/reset-password" element={<ResetPassword />} />
           
           {/* Protected Navigation Workspace Routes */}
           <Route

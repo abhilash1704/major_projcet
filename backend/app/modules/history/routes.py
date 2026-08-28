@@ -1,18 +1,16 @@
 import logging
-from flask import Blueprint, jsonify, request, g
+from flask import Blueprint, jsonify, request
 from database.db import db
 from models.route_history import RouteHistory
-from app.modules.auth.security import login_required
 
 history_bp = Blueprint("history", __name__, url_prefix="/api/history")
 logger = logging.getLogger("routeflow.history")
 
 @history_bp.route("", methods=["GET"])
-@login_required
 def get_history():
-    """GET /api/history — fetch paginated history records for the current user."""
+    """GET /api/history — fetch paginated history records for the guest user."""
     try:
-        user_id = g.current_user.id
+        user_id = "guest_user"
         page = request.args.get("page", 1, type=int)
         limit = request.args.get("limit", 20, type=int)
         
@@ -67,7 +65,6 @@ def get_history():
 
 
 @history_bp.route("/<id>", methods=["DELETE"])
-@login_required
 def delete_history(id):
     """DELETE /api/history/<id> — soft delete a history record."""
     try:
@@ -76,7 +73,7 @@ def delete_history(id):
         if not record:
             return jsonify({"success": False, "error": "Record not found"}), 404
             
-        if record.user_id != g.current_user.id:
+        if record.user_id != "guest_user":
             return jsonify({"success": False, "error": "Record not found"}), 404
 
         record.soft_delete()
