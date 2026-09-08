@@ -15,6 +15,7 @@ import networkx as nx
 
 from app.modules.road_network.services.graph_service import graph_service
 from app.modules.road_network.utils.geo_utils import haversine_distance
+from app.modules.live_clustering.spatial_filter import haversine_distance_meters
 from ..config import GPS_NOISE_METERS, USER_POSITION_JITTER_METERS
 from .schemas import Observation, GroundTruthVehicle, TrajectoryDataset
 
@@ -38,7 +39,6 @@ def _add_gps_noise(lat: float, lon: float, noise_meters: float) -> Tuple[float, 
     if noise_meters <= 0:
         return lat, lon
     
-    # 1 degree lat approx 111,320m
     dlat = (random.gauss(0, noise_meters / 2.0)) / 111320.0
     dlon = (random.gauss(0, noise_meters / 2.0)) / (111320.0 * math.cos(math.radians(lat)))
     return round(lat + dlat, 6), round(lon + dlon, 6)
@@ -69,16 +69,14 @@ class TrajectoryGenerator:
         seed: Optional[int] = 42,
     ) -> Tuple[TrajectoryDataset, Dict[str, str]]:
         """
-        Generates road-constrained vehicle trajectories inside the selected area radius.
-        
-        Returns:
-            Tuple of (TrajectoryDataset, ground_truth_user_to_vehicle_map)
+        Generates road-constrained vehicle trajectories strictly inside the selected area radius.
         """
         if seed is not None:
             random.seed(seed)
             
         radius_km = radius_meters / 1000.0
         
+        # Stage 1 candidate lookup
         candidates = graph_service.find_candidates_in_radius(center_lat, center_lon, radius_km * 1.2)
         if not candidates:
             fast_node = graph_service.find_nearest_node_fast(center_lat, center_lon)
@@ -87,31 +85,53 @@ class TrajectoryGenerator:
                 
         node_ids = [c["node_id"] for c in candidates] if candidates else []
         nx_g = graph_service.get_nx_graph()
-        valid_nodes = [n for n in node_ids if nx_g is not None and nx_g.has_node(n)]
+
+        # Stage 2 exact distance screening on candidates
+        valid_nodes = []
+        if nx_g is not None:
+            for n in node_ids:
+                if nx_g.has_node(n):
+                    n_d = nx_g.nodes[n]
+                    n_lat = n_d.get("lat", n_d.get("y"))
+                    n_lon = n_d.get("lon", n_d.get("x"))
+                    if n_lat and n_lon:
+                        if haversine_distance_meters(center_lat, center_lon, float(n_lat), float(n_lon)) <= radius_meters:
+                            valid_nodes.append(n)
         
         if nx_g is None or len(valid_nodes) < 2:
-            logger.info("[TrajectoryGenerator] Creating synthetic local road network for %s", area_name)
+            logger.info("[TrajectoryGenerator] Creating synthetic local road network for %s within %.1fm", area_name, radius_meters)
             nx_g = nx.DiGraph()
             valid_nodes = []
+            grid_span_deg = (radius_meters / 111320.0) * 0.7
             for r in range(4):
                 for c in range(4):
                     nid = r * 4 + c + 10000
-                    lat_val = center_lat + (r - 1.5) * 0.002
-                    lon_val = center_lon + (c - 1.5) * 0.002
-                    nx_g.add_node(nid, lat=lat_val, lon=lon_val)
-                    valid_nodes.append(nid)
+                    lat_val = center_lat + (r - 1.5) * (grid_span_deg / 2.0)
+                    lon_val = center_lon + (c - 1.5) * (grid_span_deg / 2.0)
+                    if haversine_distance_meters(center_lat, center_lon, lat_val, lon_val) <= radius_meters:
+                        nx_g.add_node(nid, lat=lat_val, lon=lon_val)
+                        valid_nodes.append(nid)
             for r in range(4):
                 for c in range(4):
                     u = r * 4 + c + 10000
-                    if c < 3:
-                        v = u + 1
-                        nx_g.add_edge(u, v, length=200.0, name="Bengaluru Local Road")
-                        nx_g.add_edge(v, u, length=200.0, name="Bengaluru Local Road")
-                    if r < 3:
-                        v = u + 4
-                        nx_g.add_edge(u, v, length=200.0, name="Bengaluru Local Road")
-                        nx_g.add_edge(v, u, length=200.0, name="Bengaluru Local Road")
+                    if u in valid_nodes:
+                        if c < 3:
+                            v = u + 1
+                            if v in valid_nodes:
+                                nx_g.add_edge(u, v, length=200.0, name="Bengaluru Local Road")
+                                nx_g.add_edge(v, u, length=200.0, name="Bengaluru Local Road")
+                        if r < 3:
+                            v = u + 4
+                            if v in valid_nodes:
+                                nx_g.add_edge(u, v, length=200.0, name="Bengaluru Local Road")
+                                nx_g.add_edge(v, u, length=200.0, name="Bengaluru Local Road")
         
+        if not valid_nodes:
+            # Fallback node exactly at center
+            center_nid = 99999
+            nx_g.add_node(center_nid, lat=center_lat, lon=center_lon)
+            valid_nodes = [center_nid]
+
         gt_vehicles: List[GroundTruthVehicle] = []
         user_to_vehicle_map: Dict[str, str] = {}
         all_observations: List[Observation] = []
@@ -137,11 +157,9 @@ class TrajectoryGenerator:
                 veh_user_ids.append(u_id)
                 user_to_vehicle_map[u_id] = vehicle_id
                 
-            # Select random start and end nodes
             start_n = random.choice(valid_nodes)
             end_n = random.choice(valid_nodes)
             
-            # Find a valid shortest path on graph if connected
             path = None
             try:
                 if nx.has_path(nx_g, start_n, end_n):
@@ -150,7 +168,6 @@ class TrajectoryGenerator:
                 path = None
                 
             if not path or len(path) < 2:
-                # Direct 2-node path fallback from valid_nodes
                 path = [start_n, end_n]
                 
             gt_vehicles.append(GroundTruthVehicle(
@@ -162,9 +179,7 @@ class TrajectoryGenerator:
                 base_speed_kmh=round(random.uniform(25.0, 55.0), 1)
             ))
             
-            # Generate road trajectory points along path
             path_coords = []
-            edge_ids = []
             for i in range(len(path) - 1):
                 u, v = path[i], path[i+1]
                 u_d = nx_g.nodes.get(u, {})
@@ -175,13 +190,11 @@ class TrajectoryGenerator:
                     path_coords.append((float(u_lat), float(u_lon), float(v_lat), float(v_lon), f"{u}_{v}"))
                     
             if not path_coords:
-                # Node coordinate fallback
                 c_d = nx_g.nodes.get(start_n, {})
                 c_lat = c_d.get("lat", center_lat)
                 c_lon = c_d.get("lon", center_lon)
-                path_coords.append((c_lat, c_lon, c_lat + 0.002, c_lon + 0.002, f"{start_n}_{end_n}"))
+                path_coords.append((c_lat, c_lon, c_lat + 0.0005, c_lon + 0.0005, f"{start_n}_{end_n}"))
                 
-            # Interpolate movements across steps
             total_edges = len(path_coords)
             base_speed = gt_vehicles[-1].base_speed_kmh
             
@@ -189,25 +202,29 @@ class TrajectoryGenerator:
                 step_time = start_time + timedelta(seconds=step * time_step_seconds)
                 timestamp_iso = step_time.strftime("%Y-%m-%dT%H:%M:%SZ")
                 
-                # Edge index for step
                 edge_idx = (step // max(1, num_steps // total_edges)) % total_edges
                 u_lat, u_lon, v_lat, v_lon, edge_id = path_coords[edge_idx]
                 
-                # Edge progress fraction t
                 steps_per_edge = max(1, num_steps // total_edges)
                 t = (step % steps_per_edge) / float(steps_per_edge)
                 
-                # Base vehicle position
                 veh_lat = u_lat + t * (v_lat - u_lat)
                 veh_lon = u_lon + t * (v_lon - u_lon)
                 heading = _calculate_bearing(u_lat, u_lon, v_lat, v_lon)
                 
-                # Generate observation for each user in vehicle
+                # Check vehicle location distance
+                if haversine_distance_meters(center_lat, center_lon, veh_lat, veh_lon) > radius_meters:
+                    continue
+
                 for u_id in veh_user_ids:
-                    # Apply position jitter and GPS noise
                     u_lat_noisy, u_lon_noisy = _add_gps_noise(
                         veh_lat, veh_lon, GPS_NOISE_METERS + random.uniform(0, USER_POSITION_JITTER_METERS)
                     )
+                    
+                    # STAGE 2 Observation Check (Requirement 7)
+                    if haversine_distance_meters(center_lat, center_lon, u_lat_noisy, u_lon_noisy) > radius_meters:
+                        continue
+
                     user_speed = round(max(5.0, base_speed + random.uniform(-3.0, 3.0)), 1)
                     user_heading = round((heading + random.uniform(-4.0, 4.0)) % 360.0, 1)
                     
@@ -223,6 +240,7 @@ class TrajectoryGenerator:
                         road_edge_id=edge_id,
                     )
                     all_observations.append(obs)
+
                     
         # Sort all observations chronologically
         all_observations.sort(key=lambda x: x.timestamp)

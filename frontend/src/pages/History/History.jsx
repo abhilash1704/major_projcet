@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { AppLayout } from "../../modules/layout/components/AppLayout";
 import { PageContainer } from "../../modules/shared/components/PageContainer";
 import { SectionHeader } from "../../modules/layout/components/SectionHeader";
@@ -15,6 +15,8 @@ export const History = () => {
   
   const [page, setPage] = useState(1);
   const [hasNext, setHasNext] = useState(false);
+  const abortControllerRef = useRef(null);
+  const reqSequenceRef = useRef(0);
   
   const [filters, setFilters] = useState({
     algorithm: "All",
@@ -24,6 +26,14 @@ export const History = () => {
   });
 
   const fetchHistory = useCallback(async (currentPage, currentFilters) => {
+    // Cancel in-flight request
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    const seq = ++reqSequenceRef.current;
+
     try {
       setLoading(true);
       setError(null);
@@ -35,8 +45,10 @@ export const History = () => {
         routing_mode: currentFilters.routing_mode !== "All" ? currentFilters.routing_mode : undefined,
         traffic_level: currentFilters.traffic_level !== "All" ? currentFilters.traffic_level : undefined,
         search: currentFilters.search || undefined,
-      });
+      }, controller.signal);
       
+      if (seq !== reqSequenceRef.current) return; // Discard stale response
+
       if (res.success) {
         if (currentPage === 1) {
           setItems(res.items);
@@ -46,16 +58,25 @@ export const History = () => {
         setHasNext(res.has_next);
       }
     } catch (err) {
+      if (err.name === "AbortError" || err.isCancelled) return;
+      if (seq !== reqSequenceRef.current) return;
       console.error(err);
       setError("Unable to load trip history.");
     } finally {
-      setLoading(false);
+      if (seq === reqSequenceRef.current) {
+        setLoading(false);
+      }
     }
   }, []);
 
   useEffect(() => {
     setPage(1);
     fetchHistory(1, filters);
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
   }, [filters, fetchHistory]);
 
   const loadMore = () => {

@@ -29,6 +29,7 @@ export const useLocationSearch = () => {
    * calls Nominatim. Short queries are cleared immediately.
    */
   const search = useCallback((query) => {
+    lastQueryRef.current = query;
     // Clear previous debounce
     if (debounceTimer.current) {
       clearTimeout(debounceTimer.current);
@@ -71,7 +72,7 @@ export const useLocationSearch = () => {
         if (!navigator.onLine) {
           setError("No internet connection. Please check your network.");
         } else {
-          setError("Could not reach the location service. Please try again.");
+          setError("Location search unavailable. Please retry.");
         }
         setResults([]);
       } finally {
@@ -79,6 +80,13 @@ export const useLocationSearch = () => {
       }
     }, DEBOUNCE_MS);
   }, []);
+
+  const lastQueryRef = useRef("");
+  const retry = useCallback(() => {
+    if (lastQueryRef.current) {
+      search(lastQueryRef.current);
+    }
+  }, [search]);
 
   /**
    * clearResults()
@@ -92,5 +100,5 @@ export const useLocationSearch = () => {
     setLoading(false);
   }, []);
 
-  return { results, loading, error, search, clearResults };
+  return { results, loading, error, search, clearResults, retry };
 };

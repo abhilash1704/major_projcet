@@ -169,7 +169,7 @@ def get_evaluation():
     }), 200
 
 
-@live_clustering_bp.route("/traffic", methods=["GET"])
+@live_clustering_bp.route("/traffic", methods=["GET", "POST"])
 @live_clustering_bp.route("/area-snapshot", methods=["GET", "POST"])
 def get_real_traffic():
     """GET /api/live-clustering/traffic — Real external traffic provider data."""
@@ -203,6 +203,7 @@ def get_real_traffic():
 
     return jsonify({
         "status": top_status,
+        "success": True,
         "area": area,
         "traffic": traffic_payload,
         "zones": zones,

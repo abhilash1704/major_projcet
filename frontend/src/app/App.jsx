@@ -9,12 +9,14 @@ import { Settings } from '../pages/Settings/Settings';
 import { NotFound } from '../pages/NotFound/NotFound';
 import { AuthProvider } from '../features/auth/AuthContext';
 import { ProtectedRoute } from '../features/auth/ProtectedRoute';
+import { ErrorBoundary } from '../components/common/ErrorBoundary';
 
 export const App = () => {
   return (
-    <AuthProvider>
-      <BrowserRouter>
-        <Routes>
+    <ErrorBoundary>
+      <AuthProvider>
+        <BrowserRouter>
+          <Routes>
           {/* Public Landing Route */}
           <Route path="/" element={<LandingPage />} />
           <Route path="/home" element={<LandingPage />} />
@@ -83,5 +85,6 @@ export const App = () => {
         </Routes>
       </BrowserRouter>
     </AuthProvider>
+    </ErrorBoundary>
   );
 };

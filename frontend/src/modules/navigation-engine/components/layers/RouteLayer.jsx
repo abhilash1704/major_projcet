@@ -52,22 +52,20 @@ export const RouteLayer = () => {
   const etaSec  = activeRoute.total_travel_time_seconds ?? 0;
   const etaMins = Math.round(etaSec / 60);
 
-  // Dynamic Route Traffic Styling
+  // Current Route Styling — Rendered in Red (#ef4444) to match Current Route UI badge
   const trafficLevel = rerouteRecommendation?.current_route?.traffic_level || activeRoute.traffic_level || "LOW";
-  let activeColor = "#3b82f6"; // LOW blue
+  const activeColor = "#ef4444"; // Red for current route
   let activeWeight = 6;
-  let activeOpacity = 0.85;
+  let activeOpacity = previewRoute ? 0.4 : 0.9;
   let activeDash = undefined;
 
   if (trafficLevel === "HIGH") {
-    activeColor = "#ef4444"; // Red
     activeWeight = 7;
-    activeOpacity = 0.95;
+    activeOpacity = previewRoute ? 0.45 : 0.95;
     activeDash = "10, 5"; // Visual pulsing effect
   } else if (trafficLevel === "MEDIUM") {
-    activeColor = "#f97316"; // Orange
     activeWeight = 6;
-    activeOpacity = 0.9;
+    activeOpacity = previewRoute ? 0.4 : 0.9;
   }
 
   const activeRouteStyle = {
@@ -123,7 +121,8 @@ export const RouteLayer = () => {
         if (candPositions.length < 2) return null;
 
         const isPreviewingThis = previewRoute && previewRoute.id === cand.id;
-        const candColor = cand.color || (idx === 0 ? "#22c55e" : "#3b82f6");
+        const CAND_PALETTE = ["#22c55e", "#3b82f6", "#a855f7", "#06b6d4", "#eab308"];
+        const candColor = cand.color || CAND_PALETTE[idx % CAND_PALETTE.length];
 
         const candStyle = isPreviewingThis ? {
           color: candColor,
@@ -152,10 +151,10 @@ export const RouteLayer = () => {
 
       })}
 
-      {/* 2. Main Active Route Polyline */}
+      {/* 2. Main Active Route Polyline — Rendered in Red */}
       <Polyline positions={positions} pathOptions={activeRouteStyle}>
         <Tooltip sticky>
-          🗺 Route ({trafficLevel} Traffic): {distKm.toFixed(1)} km · ~{etaMins} min
+          🔴 Current Route: {distKm.toFixed(1)} km · ~{etaMins} min ({trafficLevel} Traffic)
         </Tooltip>
       </Polyline>
 

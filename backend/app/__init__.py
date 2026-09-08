@@ -26,9 +26,30 @@ def create_app(config_name=None):
         app,
         resources={r"/*": {"origins": app.config['CORS_ORIGINS']}},
         supports_credentials=True,
-        allow_headers=["Content-Type", "Authorization", "Accept", "X-Requested-With"],
+        allow_headers=["Content-Type", "Authorization", "Accept", "X-Requested-With", "X-Request-ID", "X-Correlation-ID", "Idempotency-Key"],
+        expose_headers=["X-Request-ID"],
         methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"]
     )
+
+    # Request correlation hooks
+    @app.before_request
+    def set_request_context():
+        import uuid
+        from flask import request, g
+        req_id = (
+            request.headers.get("X-Request-ID")
+            or request.headers.get("X-Correlation-ID")
+            or f"rf_{uuid.uuid4().hex[:12]}"
+        )
+        g.request_id = req_id
+
+    @app.after_request
+    def append_request_headers(response):
+        from flask import g
+        req_id = getattr(g, "request_id", None)
+        if req_id:
+            response.headers["X-Request-ID"] = req_id
+        return response
     
     # Initialize Database and Migrate
     init_db(app)
@@ -78,6 +99,51 @@ def create_app(config_name=None):
             graph_service.preload_default_graph()
         except Exception as exc:
             app.logger.warning("[Graph] Startup preload failed: %s", exc)
+
+    # Health & Observability endpoint
+    @app.route('/api/health', methods=['GET'])
+    def api_health():
+        import time
+        from flask import g
+        from sqlalchemy import text
+
+        db_status = "up"
+        try:
+            db.session.execute(text("SELECT 1"))
+        except Exception as exc:
+            app.logger.warning("[Health] DB check failed: %s", exc)
+            db_status = "unavailable"
+
+        routing_status = "ready"
+        try:
+            from app.modules.road_network.services.graph_service import graph_service
+            if not graph_service.is_default_graph_loaded():
+                routing_status = "initializing"
+        except Exception:
+            routing_status = "degraded"
+
+        traffic_provider_status = "active"
+        try:
+            from app.modules.live_clustering.traffic_provider_service import traffic_circuit_breaker
+            traffic_provider_status = traffic_circuit_breaker.state.lower()
+        except Exception:
+            traffic_provider_status = "unavailable"
+
+        overall = "healthy" if db_status == "up" else "degraded"
+        status_code = 200 if overall == "healthy" else 503
+
+        return jsonify({
+            "status": overall,
+            "success": overall == "healthy",
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "request_id": getattr(g, "request_id", None),
+            "dependencies": {
+                "database": db_status,
+                "routing_engine": routing_status,
+                "traffic_provider": traffic_provider_status,
+                "clustering_engine": "ready",
+            }
+        }), status_code
 
     # Root endpoint
     @app.route('/')

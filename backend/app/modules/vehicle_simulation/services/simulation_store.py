@@ -69,6 +69,10 @@ class SimulationStore:
             logger.info("Simulation session reset. New ID: %s", new_id)
             return new_id
 
+    def clear(self) -> str:
+        """Alias for reset_session."""
+        return self.reset_session()
+
     def set_status(self, new_status: str, expected_id: Optional[str] = None):
         """
         Sets the simulation status.

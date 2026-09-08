@@ -142,12 +142,12 @@ export const NavigationProvider = ({ children }) => {
   const [alternativeGenerationError, setAlternativeGenerationError] = useState(null);
   const [simulationStartedAt, setSimulationStartedAt] = useState(null); // timestamp when sim became RUNNING
   const [alternativeAnalysisStatus, setAlternativeAnalysisStatus] = useState("idle"); // idle | waiting | analyzing | done | error
-  const alternativeRouteRequestIdRef = useRef(0);
-  const analysisTimerRef = useRef(null);  // 5-second delay timer
-
-  // Edge-trigger and stale result protection refs
-  const previousTrafficLevelRef = useRef("LOW");
   const alternativeRequestIdRef = useRef(0);
+  const alternativeRouteRequestIdRef = alternativeRequestIdRef;
+  const analysisTimerRef = useRef(null);  // 5-second delay timer
+  const altAbortControllerRef = useRef(null);
+  const routeSequenceRef = useRef(0);
+  const routeAbortControllerRef = useRef(null);
 
 
   // Development-only diagnostic mode flag
@@ -309,192 +309,289 @@ export const NavigationProvider = ({ children }) => {
     const dstId = activeRoute.target_node_id || activeRoute.destination_node;
     if (!srcId || !dstId) return;
 
+    // Cancel any in-flight request
+    if (altAbortControllerRef.current) altAbortControllerRef.current.abort();
+    const abortCtrl = new AbortController();
+    altAbortControllerRef.current = abortCtrl;
+
     const reqId = ++alternativeRequestIdRef.current;
     setIsAlternativeCalculating(true);
 
     const currDist = activeRoute.total_distance_km || activeRoute.distance_km || 0;
-    const currEta = Math.round((activeRoute.total_travel_time_seconds || 0) / 60);
+    const currEta  = Math.round((activeRoute.total_travel_time_seconds || 0) / 60);
 
     setRerouteRecommendation({
       status: "CALCULATING",
-      reason: "HIGH traffic detected on active route. Finding best alternatives...",
+      reason: "Finding best alternatives...",
       current_route: {
-        distance_km: currDist,
-        eta_minutes: currEta,
+        distance_km:   currDist,
+        eta_minutes:   currEta,
         traffic_level: "HIGH",
-        traffic_cost: activeRoute.traffic_cost || 0
+        traffic_cost:  activeRoute.traffic_cost || 0,
       },
-      alternatives: []
+      alternatives: [],
     });
 
     try {
-      const data = await fetchAlternativeRoutes(srcId, dstId, activeRoute, "HIGH", 2, reqId);
+      const data = await fetchAlternativeRoutes(
+        srcId, dstId, activeRoute, "HIGH", 2, reqId,
+        selectedRoutingMode, selectedAlgorithm, abortCtrl.signal
+      );
 
-      // Stale Result Protection Check
-      if (alternativeRequestIdRef.current !== reqId) {
-        console.log("[ALT_ENGINE] Discarded stale result", reqId);
-        return;
-      }
+      if (alternativeRequestIdRef.current !== reqId) return; // stale
 
       setIsAlternativeCalculating(false);
 
-      if (data && (data.success || data.status === "success" || data.status === "partial")) {
+      if (data?.success) {
         const alts = data.alternatives || [];
         if (alts.length > 0) {
           setRerouteRecommendation({
             status: "REROUTE_AVAILABLE",
-            reason: `HIGH traffic detected. Found ${alts.length} alternative route(s).`,
-            current_route: data.current_route || {
-              distance_km: currDist,
-              eta_minutes: currEta,
-              traffic_level: "HIGH"
-            },
+            reason: `Found ${alts.length} alternative route(s).`,
+            current_route: data.current_route || { distance_km: currDist, eta_minutes: currEta, traffic_level: "HIGH" },
             alternative_routes: alts,
             alternatives: alts,
-            generation_time_ms: data.generation_time_ms || data.execution_time_ms
+            generation_time_ms: data.generation_time_ms || data.execution_time_ms,
           });
         } else {
           setRerouteRecommendation({
             status: "NO_BETTER_ROUTE",
-            reason: "No suitable alternative route found.",
-            current_route: data.current_route || {
-              distance_km: currDist,
-              eta_minutes: currEta,
-              traffic_level: "HIGH"
-            },
+            reason: data.message || "No suitable alternative route found.",
+            current_route: data.current_route || { distance_km: currDist, eta_minutes: currEta, traffic_level: "HIGH" },
             alternative_routes: [],
-            alternatives: []
+            alternatives: [],
           });
         }
-      } else if (data && data.reason === "timeout") {
+      } else if (data?.error?.code === "ROUTE_GENERATION_TIMEOUT") {
         setRerouteRecommendation({
           status: "TIMEOUT",
           reason: "Route generation timed out.",
-          current_route: {
-            distance_km: currDist,
-            eta_minutes: currEta,
-            traffic_level: "HIGH"
-          },
+          current_route: { distance_km: currDist, eta_minutes: currEta, traffic_level: "HIGH" },
           alternative_routes: [],
-          alternatives: []
+          alternatives: [],
         });
       } else {
         setRerouteRecommendation({
           status: "ERROR",
-          reason: data?.message || "Failed to calculate alternative routes.",
-          current_route: {
-            distance_km: currDist,
-            eta_minutes: currEta,
-            traffic_level: "HIGH"
-          },
+          reason: data?.error?.message || data?.message || "Failed to calculate alternative routes.",
+          current_route: { distance_km: currDist, eta_minutes: currEta, traffic_level: "HIGH" },
           alternative_routes: [],
-          alternatives: []
+          alternatives: [],
         });
       }
     } catch (err) {
-      console.error("[ALT_ENGINE] Alternative route calculation error:", err);
+      if (err.name === "AbortError") return; // intentional cancellation — no state update
       if (alternativeRequestIdRef.current === reqId) {
         setIsAlternativeCalculating(false);
         setRerouteRecommendation({
           status: "ERROR",
           reason: err.message || "Failed to generate alternative routes.",
-          current_route: {
-            distance_km: currDist,
-            eta_minutes: currEta,
-            traffic_level: "HIGH"
-          },
+          current_route: { distance_km: currDist, eta_minutes: currEta, traffic_level: "HIGH" },
           alternative_routes: [],
-          alternatives: []
+          alternatives: [],
         });
       }
     }
-  }, [activeRoute, isAlternativeCalculating]);
+  }, [activeRoute, isAlternativeCalculating, selectedRoutingMode, selectedAlgorithm]);
 
   // ── On-Demand Alternative Route Generation (AlternativeRoutesCard) ───────
   const handleGenerateAlternatives = useCallback(async () => {
+    // Idempotency guard: ignore if already generating
     if (!activeRoute || isGeneratingAlternatives) return;
 
     const srcId = activeRoute.source_node_id || activeRoute.source_node;
     const dstId = activeRoute.target_node_id || activeRoute.destination_node;
     if (!srcId || !dstId) return;
 
-    const reqId = ++alternativeRouteRequestIdRef.current;
-    setIsGeneratingAlternatives(true);
-    setAlternativeGenerationError(null);
-    setAlternativeRoutes([]);
-    setAlternativeAnalysisStatus("analyzing");
-
-    // 20-second hard frontend timeout
-    let timeoutId = null;
-    const timeoutPromise = new Promise((_, reject) => {
-      timeoutId = setTimeout(() => reject(new Error("TIMEOUT")), 20000);
-    });
-
-    try {
-      const data = await Promise.race([
-        fetchAlternativeRoutes(srcId, dstId, activeRoute, "HIGH", 2, reqId),
-        timeoutPromise
-      ]);
-      clearTimeout(timeoutId);
-
-      // Stale request protection
-      if (alternativeRouteRequestIdRef.current !== reqId) return;
-
-      setIsGeneratingAlternatives(false);
-
-      if (data && (data.success || data.status === "success" || data.status === "partial")) {
-        const alts = data.alternatives || [];
-        setAlternativeRoutes(alts);
-        if (alts.length === 0) {
-          setAlternativeGenerationError("No suitable alternative routes found.");
-          setAlternativeAnalysisStatus("done");
-        } else {
-          setAlternativeAnalysisStatus("done");
-        }
-      } else {
-        setAlternativeGenerationError(data?.message || "Failed to generate alternative routes.");
-        setAlternativeAnalysisStatus("error");
-      }
-    } catch (err) {
-      clearTimeout(timeoutId);
-      if (alternativeRouteRequestIdRef.current !== reqId) return;
-      setIsGeneratingAlternatives(false);
-      if (err.message === "TIMEOUT") {
-        setAlternativeGenerationError("Alternative route generation timed out. Current route is still active.");
-      } else {
-        setAlternativeGenerationError(err.message || "Failed to generate alternative routes.");
-      }
-      setAlternativeAnalysisStatus("error");
-    }
-  }, [activeRoute, isGeneratingAlternatives]);
-
-  // ── Auto-trigger alternative analysis 5s after simulation starts ─────────
-  useEffect(() => {
-    // Clear any existing timer when deps change
+    // Clear any pending auto-trigger timer — manual click supersedes it
     if (analysisTimerRef.current) {
       clearTimeout(analysisTimerRef.current);
       analysisTimerRef.current = null;
     }
 
-    // Only auto-trigger when simulation is RUNNING, route exists, not already generating/done
+    // Cancel any in-flight request
+    if (altAbortControllerRef.current) altAbortControllerRef.current.abort();
+    const abortCtrl = new AbortController();
+    altAbortControllerRef.current = abortCtrl;
+
+    const reqId = ++alternativeRequestIdRef.current;
+    setIsGeneratingAlternatives(true);
+    setAlternativeGenerationError(null);
+    setAlternativeRoutes([]);
+    setAlternativeAnalysisStatus("analyzing");
+
+    // Safety timeout: 25 s hard frontend ceiling
+    let timeoutId = null;
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        abortCtrl.abort();
+        reject(new Error("FRONTEND_TIMEOUT"));
+      }, 25000);
+    });
+
+    try {
+      const data = await Promise.race([
+        fetchAlternativeRoutes(
+          srcId, dstId, activeRoute, "HIGH", 2, reqId,
+          selectedRoutingMode, selectedAlgorithm, abortCtrl.signal
+        ),
+        timeoutPromise,
+      ]);
+      clearTimeout(timeoutId);
+
+      // Stale request protection
+      if (alternativeRequestIdRef.current !== reqId) return;
+
+      // ── Validate response structure ──────────────────────────────────────
+      if (!data || typeof data !== "object") {
+        setAlternativeGenerationError("Received an unexpected response from the server.");
+        setAlternativeAnalysisStatus("error");
+        return;
+      }
+
+      if (data.success) {
+        const alts = Array.isArray(data.alternatives) ? data.alternatives : [];
+        // Validate each alternative before rendering
+        const validAlts = alts.filter(
+          (a) =>
+            a &&
+            typeof (a.distance_km ?? a.total_distance_km) === "number" &&
+            isFinite(a.distance_km ?? a.total_distance_km) &&
+            (a.distance_km ?? a.total_distance_km) > 0 &&
+            Array.isArray(a.nodes || a.path)
+        );
+        setAlternativeRoutes(validAlts);
+        if (validAlts.length === 0) {
+          // zero alternatives is a valid outcome — not an error
+          setAlternativeGenerationError(null);
+          setAlternativeAnalysisStatus("no_alternatives");
+        } else {
+          setAlternativeAnalysisStatus("done");
+        }
+      } else {
+        // Structured error from backend
+        const errMsg =
+          data?.error?.message ||
+          data?.message ||
+          (data?.error?.code === "ROUTE_GENERATION_TIMEOUT"
+            ? "Alternative route analysis timed out. Please try again."
+            : "Failed to generate alternative routes.");
+        setAlternativeGenerationError(errMsg);
+        setAlternativeAnalysisStatus("error");
+      }
+    } catch (err) {
+      clearTimeout(timeoutId);
+      if (err.name === "AbortError") {
+        if (alternativeRequestIdRef.current === reqId) {
+          setAlternativeAnalysisStatus("cancelled");
+        }
+        return;
+      }
+      if (alternativeRequestIdRef.current !== reqId) return;
+      if (err.message === "FRONTEND_TIMEOUT") {
+        setAlternativeGenerationError(
+          "Alternative route analysis timed out. Current route is still active."
+        );
+      } else {
+        setAlternativeGenerationError(
+          err.message || "Failed to generate alternative routes."
+        );
+      }
+      setAlternativeAnalysisStatus("error");
+    } finally {
+      if (alternativeRequestIdRef.current === reqId) {
+        setIsGeneratingAlternatives(false);
+      }
+    }
+  }, [activeRoute, isGeneratingAlternatives, selectedRoutingMode, selectedAlgorithm]);
+
+  // ── Select and Switch to an Alternative Route (Prompt Section 24) ─────────
+  const handleSelectAlternativeRoute = useCallback(async (altRoute) => {
+    if (!altRoute || isRouteSwitching) return false;
+    const nodes = altRoute.nodes || altRoute.path;
+    if (!Array.isArray(nodes) || nodes.length < 2) {
+      setRouteSwitchError("Selected alternative route has invalid nodes.");
+      return false;
+    }
+    const dist = altRoute.distance_km || altRoute.total_distance_km;
+    if (typeof dist !== "number" || dist <= 0 || !isFinite(dist)) {
+      setRouteSwitchError("Selected alternative route has invalid distance.");
+      return false;
+    }
+
+    setIsRouteSwitching(true);
+    setRouteSwitchError(null);
+
+    try {
+      const targetRoute = {
+        ...altRoute,
+        source_node_id: altRoute.source_node || (typeof nodes[0] === "object" ? nodes[0].id : nodes[0]),
+        target_node_id: altRoute.destination_node || (typeof nodes[nodes.length - 1] === "object" ? nodes[nodes.length - 1].id : nodes[nodes.length - 1]),
+        total_distance_km: dist,
+        distance_km: dist,
+        total_travel_time_seconds: altRoute.travel_time_seconds || (altRoute.eta_minutes * 60),
+        travel_time_seconds: altRoute.travel_time_seconds || (altRoute.eta_minutes * 60),
+        status: "success",
+        success: true,
+      };
+
+      try {
+        await backendSetActiveRoute(
+          targetRoute,
+          altRoute.algorithm === "Dijkstra" ? "dijkstra" : "astar",
+          selectedRoutingMode,
+          "User selected alternative route"
+        );
+      } catch (beErr) {
+        console.warn("Backend active route sync notice:", beErr.message);
+      }
+
+      setActiveRoute(targetRoute);
+      setAlternativeRoutes((prev) =>
+        prev.filter((r) => (r.route_id || r.id) !== (altRoute.route_id || altRoute.id))
+      );
+      return true;
+    } catch (err) {
+      console.error("Failed to select alternative route:", err);
+      setRouteSwitchError("Unable to switch to alternative route. Current route remains active.");
+      return false;
+    } finally {
+      setIsRouteSwitching(false);
+    }
+  }, [isRouteSwitching, selectedRoutingMode, setActiveRoute]);
+
+  // ── Auto-trigger alternative analysis 5s after simulation starts ─────────
+  useEffect(() => {
+    if (analysisTimerRef.current) {
+      clearTimeout(analysisTimerRef.current);
+      analysisTimerRef.current = null;
+    }
+
     if (
       simulationStatus !== "running" ||
       !activeRoute ||
       isGeneratingAlternatives ||
-      (alternativeRoutes && alternativeRoutes.length > 0)
+      (alternativeRoutes && alternativeRoutes.length > 0) ||
+      alternativeAnalysisStatus === "analyzing" ||
+      alternativeAnalysisStatus === "done" ||
+      alternativeAnalysisStatus === "no_alternatives"
     ) {
       return;
     }
 
-    // Record that simulation started (for UI display)
     setSimulationStartedAt(Date.now());
     setAlternativeAnalysisStatus("waiting");
 
-    // Start 5-second delayed auto-analysis
+    // 5-second delayed auto-analysis
     analysisTimerRef.current = setTimeout(() => {
       analysisTimerRef.current = null;
-      // Re-check conditions (via ref and state snapshot)
-      handleGenerateAlternatives();
+      // Guard: only run if still in waiting state (manual click may have started it)
+      setAlternativeAnalysisStatus((prev) => {
+        if (prev === "waiting") {
+          handleGenerateAlternatives();
+        }
+        return prev;
+      });
     }, 5000);
 
     return () => {
@@ -505,6 +602,18 @@ export const NavigationProvider = ({ children }) => {
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [simulationStatus, activeRoute]);
+
+  // ── Abort in-flight requests on unmount ───────────────────────────────────
+  useEffect(() => {
+    return () => {
+      if (altAbortControllerRef.current) {
+        altAbortControllerRef.current.abort();
+      }
+      if (routeAbortControllerRef.current) {
+        routeAbortControllerRef.current.abort();
+      }
+    };
+  }, []);
 
 
   // ── Route Calculation — Sprint 5.3 / 5.5 ───────────────────────────────────
@@ -519,19 +628,37 @@ export const NavigationProvider = ({ children }) => {
     dstName = null
   ) => {
     if (!srcNodeId || !dstNodeId) return null;
+
+    // Cancel prior in-flight route calculation (Requirement 4 & 14)
+    if (routeAbortControllerRef.current) {
+      routeAbortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    routeAbortControllerRef.current = controller;
+    const currentSeq = ++routeSequenceRef.current;
+
     setRouteLoading(true);
     setRouteError(null);
 
     try {
-      const route = await calculateRoute(srcNodeId, dstNodeId, srcCoords, dstCoords, algorithm, routingMode, srcName, dstName);
+      const route = await calculateRoute(
+        srcNodeId, dstNodeId, srcCoords, dstCoords, algorithm, routingMode, srcName, dstName,
+        controller.signal, `route_${currentSeq}`
+      );
+
+      // Discard stale out-of-order response (Requirement 14 & 19)
+      if (currentSeq !== routeSequenceRef.current) {
+        console.info(`[NavigationEngine] Discarded stale route calculation response #${currentSeq} (latest is #${routeSequenceRef.current})`);
+        return null;
+      }
+
       if (route) {
         // Step 9 — Only replace existing route after both endpoints resolve and new route is calculated
         setActiveRoute(route);
 
-        // Invalidate stale alternative calculations & reset traffic transition state
+        // Invalidate stale alternative calculations & cancel any in-flight request
+        if (altAbortControllerRef.current) altAbortControllerRef.current.abort();
         alternativeRequestIdRef.current++;
-        alternativeRouteRequestIdRef.current++;
-        previousTrafficLevelRef.current = "LOW";
         setIsAlternativeCalculating(false);
         setRerouteRecommendation(null);
         setPreviewRoute(null);
@@ -543,17 +670,31 @@ export const NavigationProvider = ({ children }) => {
         if (analysisTimerRef.current) { clearTimeout(analysisTimerRef.current); analysisTimerRef.current = null; }
 
         // Perform background algorithm comparison without overriding active route
-        compareAlgorithms(srcNodeId, dstNodeId, srcCoords, dstCoords, routingMode)
-          .then((data) => setComparisonData(data))
-          .catch((err) => console.warn("Background algorithm comparison notice:", err.message));
+        compareAlgorithms(srcNodeId, dstNodeId, srcCoords, dstCoords, routingMode, controller.signal)
+          .then((data) => {
+            if (currentSeq === routeSequenceRef.current) setComparisonData(data);
+          })
+          .catch((err) => {
+            if (err.name !== "AbortError") {
+              console.warn("Background algorithm comparison notice:", err.message);
+            }
+          });
       }
       return route;
     } catch (err) {
+      if (err.name === "AbortError" || err.isCancelled) {
+        return null;
+      }
+      if (currentSeq !== routeSequenceRef.current) {
+        return null;
+      }
       console.error("Route calculation failed:", err.message);
-      setRouteError(err.message || "Route calculation failed.");
+      setRouteError(err.message || "Unable to calculate route. Current page remains usable.");
       return null;
     } finally {
-      setRouteLoading(false);
+      if (currentSeq === routeSequenceRef.current) {
+        setRouteLoading(false);
+      }
     }
   }, []);
 
@@ -563,10 +704,9 @@ export const NavigationProvider = ({ children }) => {
       clearInterval(simulationIntervalRef.current);
       simulationIntervalRef.current = null;
     }
-    // Invalidate stale alternative calculations & reset traffic transition state
+    // Invalidate stale alternative calculations & cancel any in-flight request
+    if (altAbortControllerRef.current) altAbortControllerRef.current.abort();
     alternativeRequestIdRef.current++;
-    alternativeRouteRequestIdRef.current++;
-    previousTrafficLevelRef.current = "LOW";
     setIsAlternativeCalculating(false);
 
     setSourceText("");
@@ -903,6 +1043,7 @@ export const NavigationProvider = ({ children }) => {
         simulationStartedAt,
         alternativeAnalysisStatus,
         handleGenerateAlternatives,
+        handleSelectAlternativeRoute,
       }}
     >
       {children}

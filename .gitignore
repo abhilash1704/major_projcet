@@ -6,6 +6,7 @@ __pycache__/
 venv/
 env/
 .env
+.pytest_cache/
 
 # React / Vite
 node_modules/

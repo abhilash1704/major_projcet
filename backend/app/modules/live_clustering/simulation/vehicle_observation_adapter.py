@@ -13,27 +13,21 @@ from app.modules.live_clustering.simulation.user_observation_generator import (
     generate_user_observations_for_vehicle,
 )
 from app.modules.live_clustering.trajectory.replay_engine import replay_engine
-from app.modules.live_clustering.trajectory.generator import trajectory_generator
+from app.modules.live_clustering.spatial_filter import (
+    haversine_distance_meters,
+    filter_vehicles_to_analysis_area,
+    filter_observations_to_analysis_area,
+)
+
+from app.modules.live_clustering.trajectory.generator import generator as trajectory_generator
 
 logger = logging.getLogger("routeflow.live_clustering.vehicle_observation_adapter")
-
-def haversine_distance_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """
-    Computes Haversine distance in meters between two lat/lon points.
-    """
-    r = 6371000.0  # Earth radius in meters
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlambda = math.radians(lon2 - lon1)
-
-    a = math.sin(dphi / 2.0) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2.0) ** 2
-    return 2.0 * r * math.atan2(math.sqrt(a), math.sqrt(1.0 - a))
 
 
 class VehicleObservationAdapter:
     """
     Reads active simulated vehicles in READ-ONLY mode and adapts them into
-    virtual GPS user observations filtered by selectedArea.
+    virtual GPS user observations filtered strictly by selectedArea center and radius_meters.
     """
 
     def get_user_observations_for_area(
@@ -45,79 +39,110 @@ class VehicleObservationAdapter:
     ) -> Dict[str, Any]:
         """
         Retrieves user observations for vehicles within the selected area.
+        Enforces Stage 1 + Stage 2 spatial validation on both vehicles and user observations.
         """
         snapshot = simulation_store.get_snapshot()
         all_vehicles = snapshot.get("vehicles", [])
         sim_status = snapshot.get("status", "IDLE")
 
-        vehicles_in_area = []
-        for v in all_vehicles:
-            try:
-                v_lat = float(v.get("latitude", 0.0))
-                v_lon = float(v.get("longitude", 0.0))
-                dist = haversine_distance_meters(center_lat, center_lon, v_lat, v_lon)
-                if dist <= radius_meters:
-                    vehicles_in_area.append(v)
-            except (ValueError, TypeError):
-                continue
+        # Stage 1 + 2 Vehicle Filtering via shared spatial_filter function
+        vehicles_in_area = filter_vehicles_to_analysis_area(
+            all_vehicles, center_lat, center_lon, radius_meters
+        )
 
-        # Fallback to Trajectory Generator / Replay Engine if global simulation is idle
+        vehicles_before_filter = len(all_vehicles)
+        vehicles_after_filter = len(vehicles_in_area)
+
+        # Dynamic population scaling by radius (Requirement 5)
+        if radius_meters <= 600.0:
+            num_area_vehicles = 30
+        elif radius_meters <= 1200.0:
+            num_area_vehicles = 75
+        else:
+            num_area_vehicles = 150
+
+        # Fallback to Trajectory Generator / Replay Engine if global simulation has no area vehicles
         if len(vehicles_in_area) == 0 and use_generator_fallback:
             replay_snap = replay_engine.get_snapshot()
             if replay_snap.get("status") == "RUNNING" and replay_snap.get("window_observations"):
-                obs_list = replay_snap.get("window_observations", [])
-                gt_vehicle_ids = list(set(o.get("vehicle_source_id") for o in obs_list if o.get("vehicle_source_id")))
+                raw_obs = replay_snap.get("window_observations", [])
+                filtered_obs = filter_observations_to_analysis_area(
+                    raw_obs, center_lat, center_lon, radius_meters
+                )
+                gt_vehicle_ids = list(set(o.get("vehicle_source_id") or o.get("vehicle_id") for o in filtered_obs if o.get("vehicle_source_id") or o.get("vehicle_id")))
                 return {
                     "status": "LIVE",
                     "source": "SIMULATION_REPLAY",
                     "vehicles_in_area": len(gt_vehicle_ids),
-                    "total_simulated_vehicles": len(gt_vehicle_ids),
-                    "user_observations": obs_list,
+                    "total_simulated_vehicles": vehicles_before_filter,
+                    "vehicles_before_filter": vehicles_before_filter,
+                    "vehicles_after_filter": len(gt_vehicle_ids),
+                    "users_before_filter": len(raw_obs),
+                    "users_after_filter": len(filtered_obs),
+                    "user_observations": filtered_obs,
                     "ground_truth_vehicles": gt_vehicle_ids,
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                 }
-            elif use_generator_fallback and replay_snap.get("status") == "IDLE":
-                # Generate synthetic area vehicles on demand for seamless area analysis
+            elif use_generator_fallback and replay_snap.get("status") in ("IDLE", "STOPPED", "READY"):
+                # Generate synthetic area vehicles on demand strictly inside area
                 dataset, gt_map = trajectory_generator.generate_area_trajectories(
                     center_lat=center_lat,
                     center_lon=center_lon,
                     radius_meters=radius_meters,
-                    num_vehicles=12,
+                    num_vehicles=num_area_vehicles,
                     multi_user_ratio=0.5,
                     duration_minutes=5.0
                 )
                 replay_engine.load_dataset(dataset, gt_map)
                 replay_engine.start()
+                time.sleep(0.1)  # Allow background worker frame 0 tick
                 replay_snap = replay_engine.get_snapshot()
-                obs_list = replay_snap.get("window_observations", [])
-                gt_vehicle_ids = list(set(o.get("vehicle_source_id") for o in obs_list if o.get("vehicle_source_id")))
+                raw_obs = replay_snap.get("window_observations", [])
+                filtered_obs = filter_observations_to_analysis_area(
+                    raw_obs, center_lat, center_lon, radius_meters
+                )
+                gt_vehicle_ids = list(set(o.get("vehicle_source_id") or o.get("vehicle_id") for o in filtered_obs if o.get("vehicle_source_id") or o.get("vehicle_id")))
                 return {
                     "status": "LIVE",
                     "source": "SIMULATION_ADAPTER",
                     "vehicles_in_area": len(gt_vehicle_ids),
-                    "total_simulated_vehicles": len(gt_vehicle_ids),
-                    "user_observations": obs_list,
+                    "total_simulated_vehicles": vehicles_before_filter,
+                    "vehicles_before_filter": vehicles_before_filter,
+                    "vehicles_after_filter": len(gt_vehicle_ids),
+                    "users_before_filter": len(raw_obs),
+                    "users_after_filter": len(filtered_obs),
+                    "user_observations": filtered_obs,
                     "ground_truth_vehicles": gt_vehicle_ids,
                     "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                 }
 
-        # Adapt vehicles from active simulation store
-        user_observations = []
+        # Generate observations for filtered in-area vehicles
+        raw_user_observations = []
         gt_vehicle_ids = []
         for v in vehicles_in_area:
             v_id = str(v.get("vehicle_id"))
             gt_vehicle_ids.append(v_id)
             user_obs = generate_user_observations_for_vehicle(v)
-            user_observations.extend(user_obs)
+            raw_user_observations.extend(user_obs)
+
+        # STAGE 2 OBSERVATION FILTER (Requirement 7: Discard noisy GPS observations pushed outside radius)
+        filtered_user_observations = filter_observations_to_analysis_area(
+            raw_user_observations, center_lat, center_lon, radius_meters
+        )
 
         return {
-            "status": "LIVE" if sim_status in ("RUNNING", "READY") or user_observations else "IDLE",
+            "status": "LIVE" if sim_status in ("RUNNING", "READY") or filtered_user_observations else "IDLE",
             "source": "SIMULATION_STORE",
-            "vehicles_in_area": len(vehicles_in_area),
-            "total_simulated_vehicles": len(all_vehicles),
-            "user_observations": user_observations,
+            "vehicles_in_area": vehicles_after_filter,
+            "total_simulated_vehicles": vehicles_before_filter,
+            "vehicles_before_filter": vehicles_before_filter,
+            "vehicles_after_filter": vehicles_after_filter,
+            "users_before_filter": len(raw_user_observations),
+            "users_after_filter": len(filtered_user_observations),
+            "user_observations": filtered_user_observations,
             "ground_truth_vehicles": gt_vehicle_ids,
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         }
 
 vehicle_observation_adapter = VehicleObservationAdapter()
+

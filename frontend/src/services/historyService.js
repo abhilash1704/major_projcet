@@ -1,33 +1,22 @@
-import axios from 'axios';
-
-const BACKEND_BASE_URL = import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:5000';
-
-const api = axios.create({
-  baseURL: `${BACKEND_BASE_URL}/api`,
-  withCredentials: true,
-  headers: {
-    'Content-Type': 'application/json',
-  },
-});
-
-api.interceptors.request.use(
-  (config) => {
-    const token = localStorage.getItem('rf_access_token');
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
-    return config;
-  },
-  (error) => Promise.reject(error)
-);
+/**
+ * historyService.js — Route History Service
+ * Utilizes the central apiClient for correlation, token management, and timeout control.
+ */
+import { apiClient, TIMEOUT_BUDGETS } from "./api";
 
 export const historyService = {
-  getHistory: async (params = {}) => {
-    const response = await api.get('/history', { params });
+  getHistory: async (params = {}, signal = null) => {
+    const response = await apiClient.get("/api/history", {
+      params,
+      timeout: TIMEOUT_BUDGETS.HISTORY,
+      signal: signal || undefined,
+    });
     return response.data;
   },
   deleteHistory: async (id) => {
-    const response = await api.delete(`/history/${id}`);
+    const response = await apiClient.delete(`/api/history/${id}`, {
+      timeout: TIMEOUT_BUDGETS.HISTORY,
+    });
     return response.data;
-  }
+  },
 };

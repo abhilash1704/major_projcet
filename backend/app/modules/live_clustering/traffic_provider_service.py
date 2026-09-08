@@ -29,7 +29,16 @@ import urllib.parse
 import threading
 from typing import Dict, Any, Optional, Tuple, List
 
+from core.circuit_breaker import CircuitBreaker
+
 logger = logging.getLogger("routeflow.live_clustering.traffic_provider")
+
+# External Traffic Provider Circuit Breaker
+traffic_circuit_breaker = CircuitBreaker(
+    name="external_traffic_provider",
+    failure_threshold=int(os.environ.get("TRAFFIC_CB_THRESHOLD", 3)),
+    recovery_timeout=float(os.environ.get("TRAFFIC_CB_RECOVERY_SECONDS", 20.0)),
+)
 
 # ---------------------------------------------------------------------------
 # Configuration & Environment Variables
@@ -141,7 +150,7 @@ def _fetch_here_flow(lat: float, lon: float, key: str) -> Optional[Dict[str, Any
 
 def _fetch_from_provider(lat: float, lon: float, radius_m: float) -> Tuple[Optional[Dict[str, Any]], bool]:
     """
-    Invokes configured external provider API.
+    Invokes configured external provider API with Circuit Breaker protection.
     Returns (raw_dict, success_flag).
     """
     provider_name = _get_provider_name()
@@ -150,17 +159,31 @@ def _fetch_from_provider(lat: float, lon: float, radius_m: float) -> Tuple[Optio
     if not provider_name or not api_key:
         return None, False
 
+    if not traffic_circuit_breaker.allow_request():
+        logger.warning(
+            "[TrafficProvider] Circuit breaker is %s. Bypassing external call for %s.",
+            traffic_circuit_breaker.state, provider_name
+        )
+        return None, False
+
     try:
+        data = None
         if provider_name == "tomtom":
             data = _fetch_tomtom_flow(lat, lon, api_key)
-            return data, data is not None
         elif provider_name == "here":
             data = _fetch_here_flow(lat, lon, api_key)
-            return data, data is not None
         else:
             logger.warning("[TrafficProvider] Unsupported provider: %s", provider_name)
             return None, False
+
+        if data is not None:
+            traffic_circuit_breaker.record_success()
+            return data, True
+        else:
+            traffic_circuit_breaker.record_failure(RuntimeError(f"{provider_name} returned empty/non-200 response"))
+            return None, False
     except Exception as exc:
+        traffic_circuit_breaker.record_failure(exc)
         logger.error("[TrafficProvider] External fetch failed for %s: %s", provider_name, exc)
         return None, False
 

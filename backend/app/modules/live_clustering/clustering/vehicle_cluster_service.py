@@ -7,6 +7,7 @@ from typing import Dict, Any, List, Optional
 import numpy as np
 from sklearn.cluster import DBSCAN
 
+from app.modules.live_clustering.spatial_filter import filter_clusters_to_analysis_area
 from ..config import CLUSTER_EPS_METERS, CLUSTER_MIN_SAMPLES
 from .feature_builder import feature_builder
 from .cluster_tracker import cluster_tracker
@@ -29,7 +30,8 @@ class VehicleClusterService:
         self,
         observations: List[Dict[str, Any]],
         center_lat: float,
-        center_lon: float
+        center_lon: float,
+        radius_meters: float = 1000.0
     ) -> Dict[str, Any]:
         with self._lock:
             if not observations:
@@ -70,7 +72,7 @@ class VehicleClusterService:
                     clusters_map[label].append(obs)
 
             # 4. Build output cluster objects with ID stability
-            clusters: List[Dict[str, Any]] = []
+            raw_clusters: List[Dict[str, Any]] = []
 
             for label, clus_obs in clusters_map.items():
                 user_ids = sorted(list({o.get("user_id", "unknown") for o in clus_obs}))
@@ -101,7 +103,12 @@ class VehicleClusterService:
                     "primary_road_edge_id": primary_edge,
                     "observations": clus_obs,
                 }
-                clusters.append(cluster_obj)
+                raw_clusters.append(cluster_obj)
+
+            # 5. Requirement 9: Cluster Safety Validation (center must be inside radius)
+            clusters = filter_clusters_to_analysis_area(
+                raw_clusters, center_lat, center_lon, radius_meters
+            )
 
             cluster_tracker.update_registry(clusters)
             metrics = calculate_clustering_metrics(len(valid_obs), clusters, len(noise_obs))
@@ -111,6 +118,7 @@ class VehicleClusterService:
                 "clusters": clusters,
                 "metrics": metrics,
             }
+
 
 
 vehicle_cluster_service = VehicleClusterService()

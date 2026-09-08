@@ -3,6 +3,7 @@ Road-Level Vehicle Density Mapper
 """
 import logging
 from typing import Dict, Any, List
+from app.modules.live_clustering.spatial_filter import filter_roads_to_analysis_area
 from app.modules.road_network.services.graph_service import graph_service
 from ..config import LOW_DENSITY_MAX, HIGH_DENSITY_MIN
 
@@ -11,17 +12,18 @@ logger = logging.getLogger("routeflow.live_clustering.road_mapping.cluster_road_
 
 class ClusterRoadMapper:
     """
-    Maps estimated vehicle clusters onto RouteFlow road edges and computes edge density.
+    Maps estimated vehicle clusters onto RouteFlow road edges and computes edge density bounded to analysis area.
     """
     
     def compute_road_density(
         self,
         clusters: List[Dict[str, Any]],
         center_lat: float,
-        center_lon: float
+        center_lon: float,
+        radius_meters: float = 1000.0
     ) -> Dict[str, Any]:
         """
-        Maps clusters to road edges and returns road density breakdown.
+        Maps clusters to road edges and returns road density breakdown restricted to analysis radius.
         """
         if not clusters:
             return {
@@ -39,7 +41,6 @@ class ClusterRoadMapper:
         for clus in clusters:
             edge_id = clus.get("primary_road_edge_id")
             if not edge_id:
-                # Nearest edge lookup fallback
                 c_lat = clus.get("center_latitude")
                 c_lon = clus.get("center_longitude")
                 if c_lat and c_lon:
@@ -54,9 +55,7 @@ class ClusterRoadMapper:
 
         # 2. Build road density breakdown per edge
         nx_g = graph_service.ensure_graph_for_points(center_lat, center_lon)
-        road_segments = []
-
-        high_cnt, med_cnt, low_cnt = 0, 0, 0
+        raw_road_segments = []
 
         for edge_id, clus_list in edge_cluster_map.items():
             vehicle_count = len(clus_list)
@@ -64,17 +63,13 @@ class ClusterRoadMapper:
             if vehicle_count <= LOW_DENSITY_MAX:
                 density_level = "LOW"
                 color = "#22c55e"  # Green
-                low_cnt += 1
             elif vehicle_count < HIGH_DENSITY_MIN:
                 density_level = "MEDIUM"
                 color = "#f59e0b"  # Orange
-                med_cnt += 1
             else:
                 density_level = "HIGH"
                 color = "#ef4444"  # Red
-                high_cnt += 1
 
-            # Resolve geometry from graph if standard edge format u_v
             geometry = None
             edge_name = "Bengaluru Road Segment"
             
@@ -92,12 +87,11 @@ class ClusterRoadMapper:
                         geometry = [[float(u_lat), float(u_lon)], [float(v_lat), float(v_lon)]]
 
             if not geometry and clus_list:
-                # Fallback geometry around cluster center
                 c_lat = clus_list[0]["center_latitude"]
                 c_lon = clus_list[0]["center_longitude"]
                 geometry = [[c_lat - 0.0005, c_lon - 0.0005], [c_lat + 0.0005, c_lon + 0.0005]]
 
-            road_segments.append({
+            raw_road_segments.append({
                 "road_edge_id": edge_id,
                 "road_name": edge_name,
                 "estimated_vehicle_count": vehicle_count,
@@ -109,6 +103,15 @@ class ClusterRoadMapper:
                 "geometry": geometry,
             })
 
+        # 3. Requirement 10: Area-bounded road density filtering
+        road_segments = filter_roads_to_analysis_area(
+            raw_road_segments, center_lat, center_lon, radius_meters
+        )
+
+        high_cnt = sum(1 for s in road_segments if s["density_level"] == "HIGH")
+        med_cnt = sum(1 for s in road_segments if s["density_level"] == "MEDIUM")
+        low_cnt = sum(1 for s in road_segments if s["density_level"] == "LOW")
+
         return {
             "status": "ACTIVE",
             "total_active_edges": len(road_segments),
@@ -117,6 +120,7 @@ class ClusterRoadMapper:
             "low_density_count": low_cnt,
             "road_segments": road_segments,
         }
+
 
 
 cluster_road_mapper = ClusterRoadMapper()

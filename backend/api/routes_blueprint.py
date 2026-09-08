@@ -8,12 +8,35 @@ Provides primary route endpoints:
     DELETE /api/routes/active  — Clear active route
 """
 import logging
-from flask import Blueprint, jsonify, request
+import time
+import threading
+from flask import Blueprint, jsonify, request, g
 from app.services.routing_service import routing_service
 import app.modules.vehicle_simulation.services.route_store as route_store
 
 routes_bp = Blueprint("routes", __name__, url_prefix="/api/routes")
 logger = logging.getLogger("routeflow.routes")
+
+# In-memory idempotency cache for route history creation (60-second TTL)
+_idempotency_lock = threading.Lock()
+_recent_idempotency_writes: dict = {}
+IDEMPOTENCY_TTL_SECONDS = 60.0
+
+
+def _is_idempotent_duplicate(key: str) -> bool:
+    if not key:
+        return False
+    now = time.monotonic()
+    with _idempotency_lock:
+        # Purge stale entries
+        expired = [k for k, ts in _recent_idempotency_writes.items() if now - ts > IDEMPOTENCY_TTL_SECONDS]
+        for k in expired:
+            del _recent_idempotency_writes[k]
+
+        if key in _recent_idempotency_writes:
+            return True
+        _recent_idempotency_writes[key] = now
+        return False
 
 
 @routes_bp.route("/calculate", methods=["POST"])
@@ -80,82 +103,101 @@ def calculate_route():
             routing_mode=routing_mode
         )
         
-        # Persist to history if user is authenticated
-        # Persist to history using a guest user
-        try:
-            from database.db import db
-            from models.route_history import RouteHistory
-            from models.user import User
+        # Persist to history with idempotency protection
+        idempotency_key = (
+            request.headers.get("Idempotency-Key")
+            or data.get("idempotency_key")
+            or data.get("request_id")
+            or request.headers.get("X-Request-ID")
+        )
+        should_persist = not _is_idempotent_duplicate(idempotency_key) if idempotency_key else True
 
-            user = db.session.query(User).filter_by(email="guest@routeflow.io").first()
-            if not user:
-                user = User(
-                    id="guest_user",
-                    full_name="Guest User",
-                    email="guest@routeflow.io",
-                    auth_provider="guest"
-                )
-                db.session.add(user)
-                db.session.commit()
-                
-            history_entry = RouteHistory(
-                user_id=user.id,
-                source_name=data.get("source_name") or "Unknown Location",
-                source_latitude=src_lat,
-                source_longitude=src_lon,
-                destination_name=data.get("destination_name") or "Unknown Location",
-                destination_latitude=dst_lat,
-                destination_longitude=dst_lon,
-                distance_km=route_result.get("distance_km"),
-                eta_minutes=route_result.get("eta_minutes"),
-                algorithm=route_result.get("algorithm"),
-                routing_mode=route_result.get("routing_mode"),
-                traffic_level=route_result.get("traffic_level"),
-                traffic_penalty=route_result.get("traffic_cost")
-            )
-            db.session.add(history_entry)
-            db.session.commit()
-        except Exception as e:
-            logger.warning("Failed to persist route history: %s", e)
+        if should_persist:
             try:
                 from database.db import db
-                db.session.rollback()
-            except:
-                pass
+                from models.route_history import RouteHistory
+                from models.user import User
 
+                user = db.session.query(User).filter_by(email="guest@routeflow.io").first()
+                if not user:
+                    user = User(
+                        id="guest_user",
+                        full_name="Guest User",
+                        email="guest@routeflow.io",
+                        auth_provider="guest"
+                    )
+                    db.session.add(user)
+                    db.session.commit()
+                    
+                history_entry = RouteHistory(
+                    user_id=user.id,
+                    source_name=data.get("source_name") or "Unknown Location",
+                    source_latitude=src_lat,
+                    source_longitude=src_lon,
+                    destination_name=data.get("destination_name") or "Unknown Location",
+                    destination_latitude=dst_lat,
+                    destination_longitude=dst_lon,
+                    distance_km=route_result.get("distance_km"),
+                    eta_minutes=route_result.get("eta_minutes"),
+                    algorithm=route_result.get("algorithm"),
+                    routing_mode=route_result.get("routing_mode"),
+                    traffic_level=route_result.get("traffic_level"),
+                    traffic_penalty=route_result.get("traffic_cost")
+                )
+                db.session.add(history_entry)
+                db.session.commit()
+            except Exception as e:
+                logger.warning("Failed to persist route history: %s", e)
+                try:
+                    from database.db import db
+                    db.session.rollback()
+                except:
+                    pass
+        else:
+            logger.info("Skipping duplicate route history persistence for key: %s", idempotency_key)
+
+        req_id = getattr(g, "request_id", None) or data.get("request_id")
         return jsonify({
             "success": True,
             "status": "success",
-            "route": route_result
+            "route": route_result,
+            "request_id": req_id,
         }), 200
 
     except TimeoutError as exc:
+        req_id = getattr(g, "request_id", None)
         return jsonify({
             "success": False,
             "status": "error",
             "error": "ROUTE_TIMEOUT",
             "message": str(exc),
+            "request_id": req_id,
         }), 504
 
     except ValueError as exc:
+        req_id = getattr(g, "request_id", None)
         msg = str(exc)
         if "Unsupported routing algorithm" in msg:
-            return jsonify({"success": False, "status": "error", "error": "Unsupported routing algorithm"}), 400
+            return jsonify({"success": False, "status": "error", "error": "Unsupported routing algorithm", "message": msg, "request_id": req_id}), 400
         if "is not present in the routing graph" in msg or "not found" in msg.lower():
-            return jsonify({"success": False, "status": "error", "error": msg}), 404
+            return jsonify({"success": False, "status": "error", "error": msg, "message": msg, "request_id": req_id}), 404
         if "no valid road path" in msg.lower() or "no path" in msg.lower():
-            return jsonify({"success": False, "status": "error", "error": msg}), 404
-        return jsonify({"success": False, "status": "error", "error": msg}), 400
+            return jsonify({"success": False, "status": "error", "error": msg, "message": msg, "request_id": req_id}), 404
+        return jsonify({"success": False, "status": "error", "error": msg, "message": msg, "request_id": req_id}), 400
 
     except RuntimeError as exc:
-        return jsonify({"success": False, "status": "error", "error": str(exc)}), 503
+        req_id = getattr(g, "request_id", None)
+        return jsonify({"success": False, "status": "error", "error": str(exc), "message": str(exc), "request_id": req_id}), 503
 
     except Exception as exc:
+        req_id = getattr(g, "request_id", None)
         logger.exception("Unexpected error during route calculation")
         return jsonify({
             "success": False,
             "status": "error",
-            "error": "Internal server error during route calculation"
+            "error": "Internal server error during route calculation",
+            "message": "An unexpected error occurred during route calculation.",
+            "request_id": req_id,
         }), 500
 
 
@@ -294,8 +336,7 @@ def get_alternative_routes():
     """
     POST /api/routes/alternatives
 
-    Triggered when HIGH traffic is detected on active route.
-    Generates 2-3 algorithmically diverse alternative routes using A* and Dijkstra.
+    Generates diverse alternative routes using A* and Dijkstra.
 
     JSON Payload:
     {
@@ -303,18 +344,38 @@ def get_alternative_routes():
         "destination": "...",
         "current_route": {...},
         "traffic_level": "HIGH",
-        "max_alternatives": 3,
+        "routing_mode": "traffic_aware",
+        "algorithm": "astar",
+        "max_alternatives": 2,
         "request_id": "..."
+    }
+
+    Success Response (200):
+    {
+        "success": true,
+        "request_id": "...",
+        "alternatives": [...],
+        "current_route": {...}
+    }
+
+    Error Response (4xx/5xx):
+    {
+        "success": false,
+        "request_id": "...",
+        "error": { "code": "...", "message": "..." },
+        "alternatives": []
     }
     """
     data = request.get_json(silent=True) or {}
 
-    source = data.get("source") or data.get("source_node") or data.get("source_node_id")
-    destination = data.get("destination") or data.get("destination_node") or data.get("target_node")
-    current_route = data.get("current_route") or data.get("route")
-    traffic_level = data.get("traffic_level", "HIGH")
-    max_alternatives = int(data.get("max_alternatives", 2))
-    request_id = data.get("request_id") or data.get("alternative_request_id")
+    source          = data.get("source") or data.get("source_node") or data.get("source_node_id")
+    destination     = data.get("destination") or data.get("destination_node") or data.get("target_node")
+    current_route   = data.get("current_route") or data.get("route")
+    traffic_level   = data.get("traffic_level", "HIGH")
+    routing_mode    = (data.get("routing_mode") or data.get("mode") or "traffic_aware").strip().lower()
+    algorithm       = (data.get("algorithm") or "astar").strip().lower()
+    max_alternatives = max(1, min(int(data.get("max_alternatives", 2)), 2))
+    request_id      = data.get("request_id") or data.get("alternative_request_id")
 
     if not source or not destination:
         # Try fetching from route_store if available
@@ -329,11 +390,18 @@ def get_alternative_routes():
 
     if not source or not destination:
         return jsonify({
-            "status": "error",
-            "trigger": "MISSING_PARAMETERS",
-            "message": "Both source and destination are required.",
-            "current_route": current_route or {},
-            "alternatives": []
+            "status":     "error",
+            "success":    False,
+            "request_id": request_id,
+            "count":      0,
+            "error": {
+                "code":    "MISSING_PARAMETERS",
+                "message": "Both source and destination node IDs are required."
+            },
+            "message": "Both source and destination node IDs are required.",
+            "alternatives": [],
+            "alternative_routes": [],
+            "current_route": current_route or {}
         }), 400
 
     try:
@@ -343,18 +411,27 @@ def get_alternative_routes():
             destination_node=destination,
             current_route=current_route,
             traffic_level=traffic_level,
+            routing_mode=routing_mode,
+            algorithm=algorithm,
             max_alternatives=max_alternatives,
             request_id=request_id
         )
         return jsonify(res), 200
 
     except Exception as exc:
-        logger.exception("Error generating alternative routes: %s", exc)
+        logger.exception("[ROUTES] Unhandled error generating alternative routes")
         return jsonify({
-            "status": "error",
-            "trigger": "SERVER_ERROR",
-            "message": str(exc),
-            "current_route": current_route or {},
-            "alternatives": []
+            "status":     "error",
+            "success":    False,
+            "request_id": request_id,
+            "count":      0,
+            "error": {
+                "code":    "ROUTE_GENERATION_FAILED",
+                "message": "An internal error occurred during alternative route analysis."
+            },
+            "message": "An internal error occurred during alternative route analysis.",
+            "alternatives": [],
+            "alternative_routes": [],
+            "current_route": current_route or {}
         }), 500
 

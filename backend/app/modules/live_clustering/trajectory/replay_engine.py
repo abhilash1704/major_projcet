@@ -76,6 +76,9 @@ class TrajectoryReplayEngine:
                 self._pause_event.set()
                 self._stop_event.clear()
                 
+                if self._worker_thread is not None and self._worker_thread.is_alive():
+                    self._worker_thread.join(timeout=0.5)
+
                 if self._worker_thread is None or not self._worker_thread.is_alive():
                     self._worker_thread = threading.Thread(
                         target=self._replay_loop,
@@ -100,7 +103,10 @@ class TrajectoryReplayEngine:
             self._pause_event.set()
             self._current_index = 0
             self._update_snapshot([], None)
-            return self.get_status()
+        if self._worker_thread is not None and self._worker_thread.is_alive():
+            if threading.current_thread() != self._worker_thread:
+                self._worker_thread.join(timeout=1.0)
+        return self.get_status()
 
     def _replay_loop(self) -> None:
         """Background thread step loop."""

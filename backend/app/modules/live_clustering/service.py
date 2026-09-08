@@ -65,12 +65,17 @@ class LiveClusteringService:
     ) -> Dict[str, Any]:
         new_id = area_id or f"custom_{round(lat,4)}_{round(lon,4)}"
         
-        # Reset session if area or radius changed
+        # Reset session and clear stores if area or radius changed (Requirement 13 & 14)
         if (self._current_area.get("id") != new_id or 
             abs(self._current_area.get("radius_meters", 1000.0) - radius_m) > 1.0):
             self._session_id = str(uuid.uuid4())
             self._generation_counter = 0
             self._last_snapshot = None
+            try:
+                trajectory_store.clear()
+                replay_engine.stop()
+            except Exception as err:
+                logger.warning("Error clearing replay store on area change: %s", err)
 
         self._current_area = {
             "id": new_id,
@@ -115,28 +120,29 @@ class LiveClusteringService:
         """
         area = self._current_area
         c_lat, c_lon = area["latitude"], area["longitude"]
+        radius_m = float(area.get("radius_meters", 1000.0))
 
         try:
             # 1. Fetch user observations via READ-ONLY Vehicle Observation Adapter
             from .simulation.vehicle_observation_adapter import vehicle_observation_adapter
             obs_res = vehicle_observation_adapter.get_user_observations_for_area(
-                c_lat, c_lon, area["radius_meters"]
+                c_lat, c_lon, radius_m
             )
             
             user_obs = obs_res.get("user_observations", [])
             gt_vehicles = obs_res.get("ground_truth_vehicles", [])
             actual_vehicle_count = len(gt_vehicles)
 
-            # 2. Run DBSCAN vehicle clustering (WITHOUT ground truth vehicle IDs)
+            # 2. Run DBSCAN vehicle clustering (WITHOUT ground truth vehicle IDs, passing radius_meters)
             cluster_res = vehicle_cluster_service.compute_vehicle_clusters(
-                user_obs, c_lat, c_lon
+                user_obs, c_lat, c_lon, radius_m
             )
 
             clusters = cluster_res.get("clusters", [])
 
-            # 3. Compute road-level density from estimated vehicle clusters
+            # 3. Compute road-level density from estimated vehicle clusters (bounded to radius_meters)
             road_density = cluster_road_mapper.compute_road_density(
-                clusters, c_lat, c_lon
+                clusters, c_lat, c_lon, radius_m
             )
 
             # 4. Compute ground truth evaluation using ground_truth_map ONLY
@@ -158,15 +164,33 @@ class LiveClusteringService:
                 "disclaimer": "Simulation-based live traffic analysis",
                 "cycle_interval_seconds": 20,
                 "area": area,
+                "analysis_area": {
+                    "name": area.get("name", "Selected Area"),
+                    "latitude": c_lat,
+                    "longitude": c_lon,
+                    "radius_meters": radius_m,
+                },
                 "simulation": {
                     "status": obs_res.get("status", "LIVE"),
                     "source": obs_res.get("source", "SIMULATION_STORE"),
+                    "global_vehicle_count": obs_res.get("vehicles_before_filter", actual_vehicle_count),
+                    "area_vehicle_count": actual_vehicle_count,
                     "vehicles_in_area": actual_vehicle_count,
-                    "total_simulated_vehicles": obs_res.get("total_simulated_vehicles", actual_vehicle_count),
+                    "vehicles_before_filter": obs_res.get("vehicles_before_filter", actual_vehicle_count),
+                    "vehicles_after_filter": actual_vehicle_count,
                     "user_observations": len(user_obs),
                     "observation_window_seconds": 5.0,
                 },
-                "clustering": cluster_res,
+                "gps": {
+                    "area_user_observations": len(user_obs),
+                    "users_before_filter": obs_res.get("users_before_filter", len(user_obs)),
+                    "users_after_filter": len(user_obs),
+                },
+                "clustering": {
+                    **cluster_res,
+                    "clusters": clusters,
+                    "estimated_vehicles": len(clusters),
+                },
                 "road_density": road_density,
                 "evaluation": evaluation,
                 "window_observations": user_obs,
@@ -189,8 +213,15 @@ class LiveClusteringService:
                 "generation": self._generation_counter,
                 "error": str(err),
                 "area": area,
-                "simulation": {"status": "UNAVAILABLE", "vehicles_in_area": 0, "user_observations": 0},
-                "clustering": {"status": "INACTIVE", "clusters": [], "metrics": {}},
+                "analysis_area": {
+                    "name": area.get("name", "Selected Area"),
+                    "latitude": c_lat,
+                    "longitude": c_lon,
+                    "radius_meters": radius_m,
+                },
+                "simulation": {"status": "UNAVAILABLE", "global_vehicle_count": 0, "area_vehicle_count": 0, "vehicles_in_area": 0, "user_observations": 0},
+                "gps": {"area_user_observations": 0, "users_before_filter": 0, "users_after_filter": 0},
+                "clustering": {"status": "INACTIVE", "clusters": [], "estimated_vehicles": 0, "metrics": {}},
                 "road_density": {"status": "INACTIVE", "road_segments": []},
                 "evaluation": {"status": "INACTIVE"},
                 "window_observations": [],
@@ -206,4 +237,5 @@ class LiveClusteringService:
 
 
 live_clustering_service = LiveClusteringService()
+
 

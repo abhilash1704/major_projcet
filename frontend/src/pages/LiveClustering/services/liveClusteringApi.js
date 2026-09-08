@@ -1,107 +1,133 @@
 /**
  * liveClusteringApi.js — Replay, DBSCAN Vehicle Clustering & Evaluation API Service
+ * Routes all operations through the central apiClient.
  */
+import { apiClient, TIMEOUT_BUDGETS } from "../../../services/api";
 
-const BACKEND_BASE_URL = import.meta.env.VITE_BACKEND_URL || "http://127.0.0.1:5000";
-const BASE_URL = `${BACKEND_BASE_URL}/api/live-clustering`;
+const BASE_PREFIX = "/api/live-clustering";
 
-async function safeFetch(url, options = {}) {
-  try {
-    const res = await fetch(url, options);
-    if (!res.ok) {
-      let msg = `HTTP ${res.status}`;
-      try {
-        const body = await res.json();
-        msg = body.error || body.message || msg;
-      } catch { /* non-JSON */ }
-      throw new Error(msg);
-    }
-    return res.json();
-  } catch (err) {
-    if (err.name === "TypeError" || (err.message && err.message.toLowerCase().includes("fetch"))) {
-      throw new Error("Live Clustering API service is temporarily unavailable.");
-    }
-    throw err;
-  }
-}
-
-export async function searchBengaluruLocation(query) {
+export async function searchBengaluruLocation(query, signal = null) {
   const q = encodeURIComponent(query.trim());
-  const data = await safeFetch(`${BASE_URL}/search-area?q=${q}`);
-  return data.results ?? [];
+  const response = await apiClient.get(`${BASE_PREFIX}/search-area?q=${q}`, {
+    timeout: TIMEOUT_BUDGETS.GEOCODING,
+    signal: signal || undefined,
+  });
+  return response.data.results ?? [];
 }
 
-export async function analyzeArea(area, radiusMeters = 1000) {
-  return safeFetch(`${BASE_URL}/analyze-area`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+export async function analyzeArea(area, radiusMeters = 1000, signal = null) {
+  const response = await apiClient.post(
+    `${BASE_PREFIX}/analyze-area`,
+    {
       latitude:      area.latitude,
       longitude:     area.longitude,
       radius_meters: radiusMeters,
       name:          area.name,
       area_id:       area.id,
       source:        area.source || "preset",
-    }),
+    },
+    {
+      timeout: TIMEOUT_BUDGETS.LIVE_CLUSTERING,
+      signal: signal || undefined,
+      operationKey: "live_clustering_analyze",
+    }
+  );
+  return response.data;
+}
+
+export async function generateTrajectories(params = {}, signal = null) {
+  const response = await apiClient.post(`${BASE_PREFIX}/trajectory/generate`, params, {
+    timeout: TIMEOUT_BUDGETS.LIVE_CLUSTERING,
+    signal: signal || undefined,
   });
+  return response.data;
 }
 
-export async function generateTrajectories(params = {}) {
-  return safeFetch(`${BASE_URL}/trajectory/generate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(params),
+export async function startReplay(signal = null) {
+  const response = await apiClient.post(`${BASE_PREFIX}/trajectory/start`, {}, {
+    timeout: TIMEOUT_BUDGETS.LIVE_CLUSTERING,
+    signal: signal || undefined,
   });
+  return response.data;
 }
 
-export async function startReplay() {
-  return safeFetch(`${BASE_URL}/trajectory/start`, { method: "POST" });
-}
-
-export async function pauseReplay() {
-  return safeFetch(`${BASE_URL}/trajectory/pause`, { method: "POST" });
-}
-
-export async function stopReplay() {
-  return safeFetch(`${BASE_URL}/trajectory/stop`, { method: "POST" });
-}
-
-export async function setReplaySpeed(speed = 1.0) {
-  return safeFetch(`${BASE_URL}/trajectory/speed`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ speed }),
+export async function pauseReplay(signal = null) {
+  const response = await apiClient.post(`${BASE_PREFIX}/trajectory/pause`, {}, {
+    timeout: TIMEOUT_BUDGETS.LIVE_CLUSTERING,
+    signal: signal || undefined,
   });
+  return response.data;
 }
 
-export async function fetchSnapshot() {
-  return safeFetch(`${BASE_URL}/snapshot`);
+export async function stopReplay(signal = null) {
+  const response = await apiClient.post(`${BASE_PREFIX}/trajectory/stop`, {}, {
+    timeout: TIMEOUT_BUDGETS.LIVE_CLUSTERING,
+    signal: signal || undefined,
+  });
+  return response.data;
 }
 
-export async function fetchTrajectorySnapshot() {
-  return safeFetch(`${BASE_URL}/trajectory/snapshot`);
+export async function setReplaySpeed(speed = 1.0, signal = null) {
+  const response = await apiClient.post(
+    `${BASE_PREFIX}/trajectory/speed`,
+    { speed },
+    { timeout: TIMEOUT_BUDGETS.LIVE_CLUSTERING, signal: signal || undefined }
+  );
+  return response.data;
 }
 
-export async function fetchVehicleClusters() {
-  return safeFetch(`${BASE_URL}/vehicle-clusters`);
+export async function fetchSnapshot(signal = null) {
+  const response = await apiClient.get(`${BASE_PREFIX}/snapshot`, {
+    timeout: TIMEOUT_BUDGETS.LIVE_CLUSTERING,
+    signal: signal || undefined,
+  });
+  return response.data;
 }
 
-export async function fetchRoadDensity() {
-  return safeFetch(`${BASE_URL}/road-density`);
+export async function fetchTrajectorySnapshot(signal = null) {
+  const response = await apiClient.get(`${BASE_PREFIX}/trajectory/snapshot`, {
+    timeout: TIMEOUT_BUDGETS.LIVE_CLUSTERING,
+    signal: signal || undefined,
+  });
+  return response.data;
 }
 
-export async function fetchEvaluation() {
-  return safeFetch(`${BASE_URL}/evaluation`);
+export async function fetchVehicleClusters(signal = null) {
+  const response = await apiClient.get(`${BASE_PREFIX}/vehicle-clusters`, {
+    timeout: TIMEOUT_BUDGETS.LIVE_CLUSTERING,
+    signal: signal || undefined,
+  });
+  return response.data;
 }
 
-export async function fetchRealTraffic(area, radiusMeters = 1000) {
-  return safeFetch(`${BASE_URL}/traffic`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
+export async function fetchRoadDensity(signal = null) {
+  const response = await apiClient.get(`${BASE_PREFIX}/road-density`, {
+    timeout: TIMEOUT_BUDGETS.LIVE_CLUSTERING,
+    signal: signal || undefined,
+  });
+  return response.data;
+}
+
+export async function fetchEvaluation(signal = null) {
+  const response = await apiClient.get(`${BASE_PREFIX}/evaluation`, {
+    timeout: TIMEOUT_BUDGETS.LIVE_CLUSTERING,
+    signal: signal || undefined,
+  });
+  return response.data;
+}
+
+export async function fetchRealTraffic(area, radiusMeters = 1000, signal = null) {
+  const response = await apiClient.post(
+    `${BASE_PREFIX}/traffic`,
+    {
       latitude:      area?.latitude,
       longitude:     area?.longitude,
       radius_meters: radiusMeters,
-    }),
-  });
+    },
+    {
+      timeout: TIMEOUT_BUDGETS.LIVE_CLUSTERING,
+      signal: signal || undefined,
+    }
+  );
+  return response.data;
 }

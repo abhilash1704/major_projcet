@@ -61,6 +61,8 @@ export const LiveClusteringProvider = ({ children }) => {
   const selectedAreaRef  = useRef(selectedArea);
   const radiusRef        = useRef(analysisRadiusMeters);
   const isPollingRef     = useRef(false);
+  const activeCycleSeqRef = useRef(0);
+  const pollAbortRef     = useRef(null);
 
   useEffect(() => {
     selectedAreaRef.current = selectedArea;
@@ -76,12 +78,23 @@ export const LiveClusteringProvider = ({ children }) => {
     setSelectedDensityFilter(null);
   }, []);
 
-  // ── Fetch Full Snapshot ──────────────────────────────────────────────────
+  // ── Fetch Full Snapshot (Resilient, preserves snapshot on failure) ────────
   const pollSnapshot = useCallback(async () => {
     if (isPollingRef.current) return;
     isPollingRef.current = true;
+
+    // Abort previous in-flight poll if any
+    if (pollAbortRef.current) {
+      pollAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    pollAbortRef.current = controller;
+    const currentSeq = activeCycleSeqRef.current;
+
     try {
-      const snapRes = await apiFetchSnapshot();
+      const snapRes = await apiFetchSnapshot(controller.signal);
+      if (currentSeq !== activeCycleSeqRef.current) return; // Stale cycle discarded
+
       if (snapRes?.snapshot) {
         const s = snapRes.snapshot;
         if (s.session_id) setSessionId(s.session_id);
@@ -91,29 +104,44 @@ export const LiveClusteringProvider = ({ children }) => {
         if (s.evaluation) setEvaluation(s.evaluation);
         if (s.window_observations) setObservations(s.window_observations);
         setStatus(s.status || "LIVE");
+        setError(null);
       }
 
       // Fetch separate real traffic panel data
-      const trafficRes = await apiFetchRealTraffic(selectedAreaRef.current, radiusRef.current);
-      if (trafficRes?.traffic) {
-        setRealTraffic(trafficRes.traffic);
+      try {
+        const trafficRes = await apiFetchRealTraffic(selectedAreaRef.current, radiusRef.current, controller.signal);
+        if (currentSeq === activeCycleSeqRef.current && trafficRes?.traffic) {
+          setRealTraffic(trafficRes.traffic);
+        }
+      } catch (trafficErr) {
+        // External traffic failure degrades gracefully; never crashes clustering
+        console.warn("[LiveClusteringContext] Traffic provider unavailable, continuing with clustering:", trafficErr.message);
       }
     } catch (err) {
-      console.warn("[LiveClusteringContext] Poll error:", err);
+      if (err.name === "AbortError" || err.isCancelled) return;
+      if (currentSeq !== activeCycleSeqRef.current) return;
+      console.warn("[LiveClusteringContext] Cycle update failed — preserving previous valid snapshot:", err.message);
+      // Requirement 18: Keep previous valid snapshot. Retry next scheduled cycle.
     } finally {
       isPollingRef.current = false;
     }
   }, []);
 
-  // ── Analyze Area (Triggers Automatic Live Cycle) ─────────────────────────
+  // ── Analyze Area (Cancels previous cycle & starts new one) ───────────────
   const analyzeArea = useCallback(async (area, radiusMeters = 1000) => {
+    const newSeq = ++activeCycleSeqRef.current;
+    if (pollAbortRef.current) {
+      pollAbortRef.current.abort();
+      pollAbortRef.current = null;
+    }
+
     setSelectedArea({ ...area });
     setAnalysisRadiusMeters(radiusMeters);
     setStatus("STARTING_LIVE_ANALYSIS");
     setError(null);
     setSelectedCluster(null);
     setSelectedSegment(null);
-    setSelectedDensityFilter(null); // Reset filter on area/radius change
+    setSelectedDensityFilter(null);
 
     // Clear old area markers & clusters immediately
     setObservations([]);
@@ -122,8 +150,13 @@ export const LiveClusteringProvider = ({ children }) => {
     setEvaluation({ status: "INACTIVE" });
     setCountdownSeconds(CYCLE_INTERVAL_SECONDS);
 
+    const controller = new AbortController();
+    pollAbortRef.current = controller;
+
     try {
-      const res = await apiAnalyzeArea(area, radiusMeters);
+      const res = await apiAnalyzeArea(area, radiusMeters, controller.signal);
+      if (newSeq !== activeCycleSeqRef.current) return; // Stale request discarded
+
       if (res?.snapshot) {
         const s = res.snapshot;
         if (s.session_id) setSessionId(s.session_id);
@@ -135,12 +168,14 @@ export const LiveClusteringProvider = ({ children }) => {
       }
       setStatus("LIVE");
     } catch (err) {
+      if (err.name === "AbortError" || err.isCancelled) return;
+      if (newSeq !== activeCycleSeqRef.current) return;
       setStatus("ERROR");
       setError(err.message || "Failed to analyze area");
     }
   }, []);
 
-  // ── 1-Second Countdown Ticker & 20-Second Refresh Loop ──────────────────
+  // ── 1-Second Countdown Ticker & Single Controlled 20-Second Refresh Loop ─
   useEffect(() => {
     pollSnapshot();
 
@@ -154,7 +189,12 @@ export const LiveClusteringProvider = ({ children }) => {
       });
     }, 1000);
 
-    return () => clearInterval(interval);
+    return () => {
+      clearInterval(interval);
+      if (pollAbortRef.current) {
+        pollAbortRef.current.abort();
+      }
+    };
   }, [pollSnapshot]);
 
   const value = {

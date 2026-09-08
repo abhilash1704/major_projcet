@@ -131,13 +131,13 @@ def normalize_node_id(raw_id, nx_graph):
     return None
 
 
-def _build_subgraph_for_corridor(nx_g, src_node, tgt_node, margin_factor=0.5):
+def _build_subgraph_for_corridor(nx_g, src_node, tgt_node, margin_factor=0.4):
     """
     Builds a geographic corridor subgraph around the src→dst bounding box.
-    Corridor margin = max(0.2°, straight-line span * margin_factor).
+    Corridor margin = max(0.12°, straight-line span * margin_factor).
 
+    Uses fast numpy array vectorised indexing (0.5 ms) when spatial index is loaded.
     Returns the subgraph, or the full graph if nodes have no coordinates.
-    This avoids exploring 517k nodes when routing within a small city area.
     """
     src_data = nx_g.nodes.get(src_node, {})
     tgt_data = nx_g.nodes.get(tgt_node, {})
@@ -152,24 +152,43 @@ def _build_subgraph_for_corridor(nx_g, src_node, tgt_node, margin_factor=0.5):
 
     lat_span = abs(float(tgt_lat) - float(src_lat))
     lon_span = abs(float(tgt_lon) - float(src_lon))
-    margin = max(0.25, max(lat_span, lon_span) * margin_factor)
+    margin = max(0.025, max(lat_span, lon_span) * margin_factor)
 
     min_lat = min(float(src_lat), float(tgt_lat)) - margin
     max_lat = max(float(src_lat), float(tgt_lat)) + margin
     min_lon = min(float(src_lon), float(tgt_lon)) - margin
     max_lon = max(float(src_lon), float(tgt_lon)) + margin
 
-    candidate_nodes = [
-        n for n, d in nx_g.nodes(data=True)
-        if (
-            min_lat <= float(d.get('lat', d.get('y', min_lat - 1))) <= max_lat and
-            min_lon <= float(d.get('lon', d.get('x', min_lon - 1))) <= max_lon
-        )
-    ]
+    if (graph_service._spatial_node_ids is not None and
+        graph_service._spatial_node_lats is not None and
+        graph_service._spatial_node_lons is not None):
+        lats = graph_service._spatial_node_lats
+        lons = graph_service._spatial_node_lons
+        mask = (lats >= min_lat) & (lats <= max_lat) & (lons >= min_lon) & (lons <= max_lon)
+        raw_ids = graph_service._spatial_node_ids[mask]
 
-    # Only use subgraph if it meaningfully reduces node count AND contains both endpoints
-    if len(candidate_nodes) < len(nx_g) * 0.9 and src_node in candidate_nodes and tgt_node in candidate_nodes:
-        return nx_g.subgraph(candidate_nodes), True
+        if len(raw_ids) > nx_g.number_of_nodes() * 0.5:
+            return nx_g, False
+
+        candidate_set = set(raw_ids)
+        if isinstance(src_node, int) or isinstance(tgt_node, int):
+            for nid in raw_ids:
+                try:
+                    candidate_set.add(int(nid))
+                except ValueError:
+                    pass
+    else:
+        candidate_set = {
+            n for n, d in nx_g.nodes(data=True)
+            if (
+                min_lat <= float(d.get('lat', d.get('y', min_lat - 1))) <= max_lat and
+                min_lon <= float(d.get('lon', d.get('x', min_lon - 1))) <= max_lon
+            )
+        }
+
+    # Only use subgraph if both endpoints are present
+    if src_node in candidate_set and tgt_node in candidate_set:
+        return nx_g.subgraph(candidate_set), True
 
     return nx_g, False
 
@@ -206,7 +225,8 @@ class RoutingService:
         destination_lon=None,
         weight="travel_time",
         routing_mode="normal",
-        reroute_penalties=None
+        reroute_penalties=None,
+        save_to_store=True
     ):
         """
         Calculate optimal path between source_node and destination_node.
@@ -281,19 +301,20 @@ class RoutingService:
         if cached is not None:
             logger.info("[ROUTE PERF] Cache HIT: %s → %s via %s [%s] (0 ms)",
                         src_raw_str, tgt_raw_str, algo_name, mode_name)
-            try:
-                if route_store.get_reroute_status() != "rerouting_evaluation":
-                    route_store.set_route({
-                        "path_nodes": [n["id"] for n in cached["nodes"]],
-                        "geometry": cached["geometry"],
-                        "source_node_id": cached["source_node"],
-                        "target_node_id": cached["destination_node"],
-                        "total_distance_km": cached["distance_km"],
-                        "total_duration_seconds": cached["travel_time_seconds"],
-                        "total_cost": cached.get("total_cost", cached["travel_time_seconds"])
-                    }, algorithm=algo_name, routing_mode=mode_name)
-            except Exception as e:
-                logger.warning("Failed to restore route in route_store: %s", e)
+            if save_to_store:
+                try:
+                    if route_store.get_reroute_status() != "rerouting_evaluation":
+                        route_store.set_route({
+                            "path_nodes": [n["id"] for n in cached["nodes"]],
+                            "geometry": cached["geometry"],
+                            "source_node_id": cached["source_node"],
+                            "target_node_id": cached["destination_node"],
+                            "total_distance_km": cached["distance_km"],
+                            "total_duration_seconds": cached["travel_time_seconds"],
+                            "total_cost": cached.get("total_cost", cached["travel_time_seconds"])
+                        }, algorithm=algo_name, routing_mode=mode_name)
+                except Exception as e:
+                    logger.warning("Failed to restore route in route_store: %s", e)
             return cached
 
         logger.info("[ROUTE PERF] Graph fetch: %.1f ms (%d nodes, %d edges) | Mode: %s (v%d)",
@@ -368,6 +389,11 @@ class RoutingService:
                             c *= extra
                     else:
                         c = base_w
+                        if reroute_penalties:
+                            e_key1 = f"{u}-{v}-{k}"
+                            e_key2 = f"{u}-{v}-0"
+                            extra = reroute_penalties.get(e_key1) or reroute_penalties.get(e_key2) or reroute_penalties.get((str(u), str(v)), 1.0)
+                            c *= extra
 
                     if c < best_cost:
                         best_cost = c
@@ -391,9 +417,15 @@ class RoutingService:
                         c *= extra
 
                     return max(0.0, c)
-                return max(0.0, base_w)
+                else:
+                    c = base_w
+                    if reroute_penalties:
+                        e_key1 = f"{u}-{v}-0"
+                        extra = reroute_penalties.get(e_key1) or reroute_penalties.get((str(u), str(v)), 1.0)
+                        c *= extra
+                    return max(0.0, c)
 
-        weight_to_pass = custom_weight_fn if mode_name == "traffic_aware" else weight_attr
+        weight_to_pass = custom_weight_fn if (mode_name == "traffic_aware" or reroute_penalties) else weight_attr
 
         # ── Pathfinding with 40-second timeout ────────────────────────────────
         t_path_start = time.perf_counter()
@@ -603,7 +635,7 @@ class RoutingService:
         }
 
         # ── Store in route_store for vehicle simulation ─────────────────────────
-        if route_store.get_reroute_status() != "rerouting_evaluation":
+        if save_to_store and route_store.get_reroute_status() != "rerouting_evaluation":
             route_store.set_route({
                 "path_nodes": path_nodes,
                 "geometry": geometry,
@@ -615,7 +647,7 @@ class RoutingService:
             }, algorithm=algo_name, routing_mode=mode_name)
 
         # ── Cache result ───────────────────────────────────────────────────────
-        if not reroute_penalties:
+        if save_to_store and not reroute_penalties:
             _cache_put(cache_key, result)
 
         # ── Performance summary log ────────────────────────────────────────────
